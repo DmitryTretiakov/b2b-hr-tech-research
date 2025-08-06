@@ -1,6 +1,6 @@
 # agents/chief_strategist.py
 import json
-from langchain_core.pydantic_v1 import BaseModel, Field
+from pydantic import BaseModel, Field 
 from typing import List, Literal
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.output_parsers import PydanticOutputParser
@@ -17,7 +17,7 @@ class Task(BaseModel):
     goal: str = Field(description="Бизнес-цель, на которую направлена эта задача. Что мы хотим узнать?")
     status: Literal['PENDING', 'IN_PROGRESS', 'COMPLETED', 'FAILED'] = Field(description="Текущий статус задачи. Новые задачи всегда PENDING.")
     retry_count: int = Field(default=0, description="Счетчик повторных попыток выполнения задачи в случае сбоя API.")
-    
+
 class Phase(BaseModel):
     """Описывает одну фазу проекта, состоящую из нескольких задач."""
     phase_name: str = Field(description="Название фазы, например 'Phase 1: Глубокая Разведка Активов ТГУ'.")
