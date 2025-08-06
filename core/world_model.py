@@ -102,3 +102,20 @@ class WorldModel:
             "static_context": self.static_context,
             "dynamic_knowledge": self.dynamic_knowledge
         }
+    def increment_task_retry_count(self, task_id: str):
+        """Находит задачу и увеличивает ее счетчик попыток."""
+        plan = self.dynamic_knowledge.get("strategic_plan", {})
+        task_found = False
+        for phase in plan.get("phases", []):
+            for task in phase.get("tasks", []):
+                if task.get("task_id") == task_id:
+                    # Убедимся, что счетчик существует, и увеличим его
+                    current_retries = task.get('retry_count', 0)
+                    task['retry_count'] = current_retries + 1
+                    print(f"   [WorldModel] Счетчик попыток для задачи '{task_id}' увеличен до {task['retry_count']}.")
+                    task_found = True
+                    break
+            if task_found:
+                break
+        if not task_found:
+            print(f"   [WorldModel] !!! Внимание: Задача с ID '{task_id}' не найдена для инкремента попыток.")

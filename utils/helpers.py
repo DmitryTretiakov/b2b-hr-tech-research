@@ -6,6 +6,11 @@ import json
 import time
 from serpapi import SerpApiClient
 
+# --- НОВОЕ КАСТОМНОЕ ИСКЛЮЧЕНИЕ ---
+class SearchAPIFailureError(Exception):
+    """Исключение, выбрасываемое, когда все поисковые API не смогли вернуть результат."""
+    pass
+
 def robust_hybrid_search(query: str, num_results: int = 10) -> dict:
     """
     Выполняет поиск, используя Serper как основной API и Google Custom Search как резервный.
@@ -51,11 +56,16 @@ def robust_hybrid_search(query: str, num_results: int = 10) -> dict:
     google_cx_id = os.getenv("SEARCH_ENGINE_ID")
     if google_api_key and google_cx_id:
         print(f"!!! [SearchAgent] Переключаюсь на резервный API (Google)...")
-        # Используем старую, надежную функцию с retry
-        return google_search_legacy(query, google_api_key, google_cx_id, num_results)
+        try:
+            # Вызываем legacy-функцию, которая теперь тоже может выбросить исключение
+            return google_search_legacy(query, google_api_key, google_cx_id, num_results)
+        except SearchAPIFailureError:
+            # Если и Google провалился, то это конец
+            pass # Проваливаемся дальше
 
+    # --- ИЗМЕНЕНИЕ: ВМЕСТО ВОЗВРАТА СЛОВАРЯ, ВЫБРАСЫВАЕМ ИСКЛЮЧЕНИЕ ---
     print("!!! КРИТИЧЕСКАЯ ОШИБКА ПОИСКА: Все API недоступны или не справились.")
-    return {"error": "Все поисковые API провалились."}
+    raise SearchAPIFailureError(f"Все поисковые API провалились для запроса: '{query}'")
 
 
 def google_search_legacy(query: str, api_key: str, cx_id: str, num_results: int) -> dict:
@@ -87,8 +97,9 @@ def google_search_legacy(query: str, api_key: str, cx_id: str, num_results: int)
             delay *= 2
             continue
             
+    # --- ИЗМЕНЕНИЕ: ВМЕСТО ВОЗВРАТА СЛОВАРЯ, ВЫБРАСЫВАЕМ ИСКЛЮЧЕНИЕ ---
     print(f"!!! КРИТИЧЕСКАЯ ОШИБКА ПОИСКА (Google): Все {retries} попытки провалились.")
-    return {"error": f"Все {retries} попытки для Google API провалились."}
+    raise SearchAPIFailureError(f"Резервный API (Google) не справился после {retries} попыток.")
 
 def google_search(query: str, api_key: str, cx_id: str, num_results: int = 10) -> dict:
     """

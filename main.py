@@ -1,12 +1,18 @@
 # main.py
 import os
+import time # <-- ДОБАВИТЬ ИМПОРТ
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from core.world_model import WorldModel
 from agents.chief_strategist import ChiefStrategist
 from agents.expert_team import ExpertTeam
-from agents.search_agent import SearchAgent 
+from agents.search_agent import SearchAgent
+from utils.helpers import SearchAPIFailureError # <-- ДОБАВИТЬ ИМПОРТ
+
+# --- НОВЫЕ КОНСТАНТЫ ДЛЯ ПОВТОРНЫХ ПОПЫТОК ---
+MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 60 # 1 минута
 
 def main():
     # --- ИНИЦИАЛИЗАЦИЯ ---
@@ -121,22 +127,39 @@ def main():
             continue
 
         task_to_run = active_tasks[0]
+        task_id = task_to_run['task_id'] # Удобно иметь ID в переменной
         
+        # --- ОБНОВЛЕННЫЙ БЛОК TRY...EXCEPT ---
         try:
             claims = expert_team.execute_task(task_to_run, world_model.get_full_context())
             
             if claims:
                 world_model.add_claims_to_kb(claims)
-                world_model.update_task_status(task_to_run['task_id'], 'COMPLETED')
+                world_model.update_task_status(task_id, 'COMPLETED')
             else:
-                world_model.update_task_status(task_to_run['task_id'], 'FAILED')
+                # Если claims пустые, но ошибки не было, значит, эксперт просто ничего не нашел
+                world_model.update_task_status(task_id, 'FAILED')
+                print(f"!!! ОРКЕСТРАТОР: Эксперт завершил задачу {task_id}, но не сгенерировал утверждений. Задача провалена.")
                 
             world_model.log_transaction({'task': task_to_run, 'results': claims if claims else "No claims generated"})
 
+        except SearchAPIFailureError as e:
+            print(f"!!! ОРКЕСТРАТОР: Произошла ошибка поиска при выполнении задачи {task_id}. Ошибка: {e}")
+            
+            current_retries = task_to_run.get('retry_count', 0)
+            if current_retries < MAX_RETRIES:
+                world_model.increment_task_retry_count(task_id)
+                print(f"   -> Попытка {current_retries + 1}/{MAX_RETRIES}. Повтор через {RETRY_DELAY_SECONDS} секунд...")
+                time.sleep(RETRY_DELAY_SECONDS)
+            else:
+                print(f"!!! ОРКЕСТРАТОР: Превышен лимит ({MAX_RETRIES}) повторных попыток для задачи {task_id}. Задача окончательно провалена.")
+                world_model.update_task_status(task_id, 'FAILED')
+                world_model.log_transaction({'task': task_to_run, 'results': f"CRITICAL SEARCH ERROR after {MAX_RETRIES} retries: {e}"})
+
         except Exception as e:
-            print(f"!!! ОРКЕСТРАТОР: Произошла критическая ошибка при выполнении задачи {task_to_run['task_id']}. Задача провалена. Ошибка: {e}")
-            world_model.update_task_status(task_to_run['task_id'], 'FAILED')
-            world_model.log_transaction({'task': task_to_run, 'results': f"CRITICAL ERROR: {e}"})
+            print(f"!!! ОРКЕСТРАТОР: Произошла НЕПРЕДВИДЕННАЯ критическая ошибка при выполнении задачи {task_id}. Задача провалена. Ошибка: {e}")
+            world_model.update_task_status(task_id, 'FAILED')
+            world_model.log_transaction({'task': task_to_run, 'results': f"UNHANDLED CRITICAL ERROR: {e}"})
 
     # --- ФИНАЛЬНЫЙ ОТЧЕТ ---
     print("\n--- Создание финальных отчетов... ---")

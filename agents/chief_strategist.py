@@ -1,58 +1,79 @@
 # agents/chief_strategist.py
 import json
-from utils.helpers import robust_json_parser # ИСПОЛЬЗУЕМ НОВЫЙ ПАРСЕР
+from langchain_core.pydantic_v1 import BaseModel, Field
+from typing import List, Literal
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.output_parsers import PydanticOutputParser
+
+# --- ОПРЕДЕЛЕНИЕ СТРУКТУРЫ ПЛАНА С ПОМОЩЬЮ PYDANTIC ---
+# Это наш "контракт" с LLM. Модель будет обязана вернуть JSON,
+# соответствующий этой структуре.
+
+class Task(BaseModel):
+    """Описывает одну конкретную задачу в рамках фазы проекта."""
+    task_id: str = Field(description="Уникальный идентификатор задачи, например 'task_001'. Должен быть уникальным во всем плане.")
+    assignee: Literal['HR_Expert', 'Finance_Expert', 'Competitor_Expert', 'Tech_Expert', 'ProductOwnerAgent'] = Field(description="Эксперт, которому поручена задача.")
+    description: str = Field(description="Четкое и краткое описание задачи для эксперта.")
+    goal: str = Field(description="Бизнес-цель, на которую направлена эта задача. Что мы хотим узнать?")
+    status: Literal['PENDING', 'IN_PROGRESS', 'COMPLETED', 'FAILED'] = Field(description="Текущий статус задачи. Новые задачи всегда PENDING.")
+    retry_count: int = Field(default=0, description="Счетчик повторных попыток выполнения задачи в случае сбоя API.")
+    
+class Phase(BaseModel):
+    """Описывает одну фазу проекта, состоящую из нескольких задач."""
+    phase_name: str = Field(description="Название фазы, например 'Phase 1: Глубокая Разведка Активов ТГУ'.")
+    status: Literal['PENDING', 'IN_PROGRESS', 'COMPLETED'] = Field(description="Текущий статус фазы.")
+    tasks: List[Task] = Field(description="Список задач для этой фазы.")
+
+class StrategicPlan(BaseModel):
+    """Описывает полный стратегический план проекта."""
+    main_goal_status: Literal['IN_PROGRESS', 'READY_FOR_FINAL_BRIEF', 'FAILED'] = Field(description="Общий статус всего проекта. IN_PROGRESS, пока идет работа.")
+    phases: List[Phase] = Field(description="Список всех фаз проекта.")
+
 
 class ChiefStrategist:
     """
     "Мозг" системы. Создает план, проводит рефлексию и пишет финальные отчеты.
-    Работает с самой мощной моделью (gemini-2.5-pro).
+    Работает с самой мощной моделью (gemini-pro).
     """
-    def __init__(self, llm):
+    def __init__(self, llm: ChatGoogleGenerativeAI):
         self.llm = llm
-        print("-> ChiefStrategist (на базе gemini-2.5-pro) готов к работе.")
-    def _invoke_llm_with_retry(self, prompt: str, is_json_output: bool = True):
-        """
-        Улучшенная "умная" обертка для вызова LLM с самокоррекцией.
-        Возвращает пустой объект в случае полного провала.
-        """
-        print("   [Стратег] -> Вызов LLM...")
-        try:
-            response = self.llm.invoke(prompt)
-            content = response.content
-        except Exception as e:
-            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА LLM: Вызов API провалился. Ошибка: {e}")
-            return {} if is_json_output else ""
+        print("-> ChiefStrategist (на базе gemini-pro) готов к работе.")
 
-        if not is_json_output:
-            return content
+    def _invoke_llm_for_json(self, prompt: str, pydantic_schema: BaseModel):
+        """
+        Новый, надежный метод для вызова LLM с гарантированным JSON-ответом.
+        """
+        print("   [Стратег] -> Вызов LLM для генерации структурированного JSON...")
+        parser = PydanticOutputParser(pydantic_object=pydantic_schema)
+        
+        prompt_with_format_instructions = f"""{prompt}
 
-        parsed_json = robust_json_parser(content)
-        if parsed_json:
-            print("   [Стратег] <- Ответ LLM успешно распарсен.")
-            return parsed_json
-        
-        print("   [Стратег] !!! Ответ LLM не является валидным JSON. Запускаю самокоррекцию...")
-        correction_prompt = f"""Твой предыдущий ответ был невалидным JSON. Исправь его.
-Верни ТОЛЬКО и ИСКЛЮЧИТЕЛЬНО валидный JSON без дополнительного текста.
-ОШИБОЧНЫЙ ОТВЕТ:\n---\n{content}\n---\nИСПРАВЛЕННЫЙ JSON:"""
-        
+{parser.get_format_instructions()}
+"""
         try:
-            correction_response = self.llm.invoke(correction_prompt)
-            corrected_json = robust_json_parser(correction_response.content)
+            response = self.llm.invoke(prompt_with_format_instructions)
+            parsed_object = parser.parse(response.content)
+            print("   [Стратег] <- Ответ LLM успешно получен и распарсен.")
+            # Возвращаем как словарь для совместимости с остальным кодом
+            return parsed_object.model_dump() 
         except Exception as e:
-            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА LLM: Вызов API самокоррекции провалился. Ошибка: {e}")
+            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА LLM/Парсера: Не удалось сгенерировать или распарсить JSON. Ошибка: {e}")
+            # Возвращаем пустой словарь, чтобы система могла обработать сбой
             return {}
 
-        if corrected_json:
-            print("   [Стратег] <- Самокоррекция прошла успешно.")
-            return corrected_json
-        else:
-            print("   [Стратег] !!! КРИТИЧЕСКАЯ ОШИБКА: Самокоррекция не удалась.")
-            return {} # Возвращаем пустой словарь вместо None
+    def _invoke_llm_for_text(self, prompt: str) -> str:
+        """Простой вызов LLM для генерации текста."""
+        print("   [Стратег] -> Вызов LLM для генерации текста...")
+        try:
+            response = self.llm.invoke(prompt)
+            return response.content
+        except Exception as e:
+            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА LLM: Вызов API провалился. Ошибка: {e}")
+            return ""
 
     def create_strategic_plan(self, world_model_context: dict) -> dict:
         """
-        Генерирует первоначальный, многофазовый и бизнес-ориентированный план исследования.
+        Генерирует первоначальный план с использованием Pydantic.
         """
         print("   [Стратег] Шаг 1: Создаю первоначальный стратегический план...")
         
@@ -65,36 +86,20 @@ class ChiefStrategist:
 **ТВОЯ ЗАДАЧА:** Проанализируй "ВХОДНОЙ БРИФ ДЛЯ ВЕРИФИКАЦИИ". Сгенерируй долгосрочный стратегический план из 3-4 логических фаз. **ПЕРВАЯ ФАЗА** должна быть посвящена **"Глубокой Разведке Активов ТГУ"**. Последующие фазы должны быть направлены на анализ рынка, конкурентов, разработку бизнес-кейса и MVP. Для каждой фазы создай список из 2-4 первоочередных, практически-ориентированных задач.
 **ДОСТУПНЫЕ ЭКСПЕРТЫ:** `HR_Expert`, `Finance_Expert`, `Competitor_Expert`, `Tech_Expert`, `ProductOwnerAgent`.
 
-**ПРИМЕР ВЫВОДА (СТРУКТУРА):**
-```json
-{{
-  "main_goal_status": "IN_PROGRESS",
-  "phases": [
-    {{
-      "phase_name": "Phase 1: Глубокая Разведка Активов ТГУ", "status": "IN_PROGRESS",
-      "tasks": [
-        {{"task_id": "task_001", "assignee": "Tech_Expert", "description": "Проверить утверждение о проблемах с производительностью Moodle при масштабировании.", "goal": "Оценить стоимость устранения технического долга Moodle.", "status": "PENDING"}}
-      ]
-    }},
-    {{
-      "phase_name": "Phase 2: Анализ Рынка и Формирование Бизнес-Кейса", "status": "PENDING", "tasks": []
-    }}
-  ]
-}}
-```
-Твой стратегический план:"""
-        
-        plan = self._invoke_llm_with_retry(prompt)
+Ты ОБЯЗАН вернуть результат в формате JSON, соответствующем предоставленной схеме.
+"""
+        plan = self._invoke_llm_for_json(prompt, StrategicPlan)
 
-        if plan and isinstance(plan, dict) and "phases" in plan:
+        if plan and "phases" in plan:
             print("   [Стратег] Первоначальный план успешно сгенерирован.")
             return plan
         else:
             print("!!! Стратег: Не удалось сгенерировать первоначальный план. Используется план по умолчанию.")
             return {"main_goal_status": "FAILED", "phases": []}
+
     def reflect_and_update_plan(self, world_model_context: dict) -> dict:
         """
-        НОВЫЙ ДВУХШАГОВЫЙ ПРОЦЕСС РЕФЛЕКСИИ
+        Двухшаговый процесс рефлексии с надежным обновлением плана.
         """
         print("   [Стратег] Шаг X: Провожу интеллектуальную рефлексию...")
         
@@ -132,10 +137,10 @@ class ChiefStrategist:
 
 Твоя аналитическая сводка:"""
         
-        return self._invoke_llm_with_retry(prompt, is_json_output=False)
+        return self._invoke_llm_for_text(prompt)
 
     def _generate_updated_plan(self, situation_summary: str, world_model_context: dict) -> dict:
-        """Шаг Б рефлексии: Превращение выводов в конкретный JSON-план."""
+        """Шаг Б рефлексии: Превращение выводов в конкретный JSON-план с помощью Pydantic."""
         print("      [Стратег.Рефлексия] Шаг Б: Превращаю выводы в конкретный план...")
         original_plan_str = json.dumps(world_model_context['dynamic_knowledge']['strategic_plan'], ensure_ascii=False, indent=2)
 
@@ -147,7 +152,7 @@ class ChiefStrategist:
 {situation_summary}
 ---
 
-**ОРИГИНАЛЬНЫЙ ПЛАН:**
+**ОРИГИНАЛЬНЫЙ ПЛАН, КОТОРЫЙ НУЖНО ОБНОВИТЬ:**
 ---
 {original_plan_str}
 ---
@@ -156,17 +161,15 @@ class ChiefStrategist:
 1.  Заверши текущую активную фазу (измени ее статус на "COMPLETED").
 2.  Если Стратег решил, что нужно дополнительное исследование, добавь новые задачи в **текущую** или **следующую** фазу.
 3.  Если Стратег решил, что все готово, начни следующую фазу или, если это последняя, измени `main_goal_status` на `READY_FOR_FINAL_BRIEF`.
-4.  Верни **полностью обновленный объект стратегического плана** в формате JSON. Убедись, что новые `task_id` уникальны.
+4.  Верни **полностью обновленный объект стратегического плана**. Убедись, что новые `task_id` уникальны и не повторяют существующие.
 
-Твой обновленный JSON-план:"""
-
-        return self._invoke_llm_with_retry(prompt, is_json_output=True)
-
+Ты ОБЯЗАН вернуть результат в формате JSON, соответствующем предоставленной схеме.
+"""
+        return self._invoke_llm_for_json(prompt, StrategicPlan)
 
     def write_executive_summary(self, world_model_context: dict) -> str:
         """Пишет короткую (2-3 страницы) аналитическую записку для коммерческого директора."""
         print("   [Стратег] Финальный Шаг (1/2): Пишу краткую аналитическую записку для руководства...")
-        # ... (код метода без изменений) ...
         prompt = f"""**ТВОЯ РОЛЬ:** Ты - Главный Продуктовый Стратег. Твоя аудитория - коммерческий директор. Его волнуют цифры, риски, ROI и конкурентные преимущества. Избегай академического языка.
 **ТВОЯ ЗАДАЧА:** На основе ВСЕЙ собранной информации, напиши убедительную аналитическую записку. Объем: не более 3 страниц. Стиль: Максимально сжатый, по делу.
 **КОНТЕКСТ И БАЗА ЗНАНИЙ:**\n---\n{json.dumps(world_model_context, ensure_ascii=False, indent=2)}\n---
@@ -179,13 +182,11 @@ class ChiefStrategist:
 6.  **Дорожная Карта MVP и Следующие Шаги:** Четкий план действий и запрос.
 **ПРАВИЛО ЦИТИРОВАНИЯ:** Каждое ключевое утверждение (цифры, факты о конкурентах) ОБЯЗАТЕЛЬНО должно сопровождаться ссылкой на доказательство в формате [Утверждение: claim_id].
 Твоя финальная аналитическая записка:"""
-        response = self._invoke_llm_with_retry(prompt, is_json_output=False)
-        return response.content
+        return self._invoke_llm_for_text(prompt)
 
     def write_extended_brief(self, world_model_context: dict) -> str:
         """Пишет подробный (5-10 страниц) обзор для Владельца Продукта."""
         print("   [Стратег] Финальный Шаг (2/2): Пишу подробный обзор для Владельца Продукта...")
-        # ... (код метода без изменений) ...
         prompt = f"""**ТВОЯ РОЛЬ:** Ты - Главный Продуктовый Стратег. Твоя аудитория - технически подкованный Владелец Продукта, которому нужна максимальная детализация для дальнейшей работы.
 **ТВОЯ ЗАДАЧА:** На основе ВСЕЙ собранной информации, напиши подробный аналитический обзор. Объем: 5-10 страниц.
 **КОНТЕКСТ И БАЗА ЗНАНИЙ:**\n---\n{json.dumps(world_model_context, ensure_ascii=False, indent=2)}\n---
@@ -200,5 +201,4 @@ class ChiefStrategist:
 8.  **Приложение: Полный список верифицированных 'Утверждений' (Claims)** с источниками.
 **ПРАВИЛО ЦИТИРОВАНИЯ:** Используй ссылки на доказательства [Утверждение: claim_id] по всему тексту.
 Твой подробный аналитический обзор:"""
-        response = self._invoke_llm_with_retry(prompt, is_json_output=False)
-        return response.content
+        return self._invoke_llm_for_text(prompt)
