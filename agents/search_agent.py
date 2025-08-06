@@ -1,19 +1,21 @@
 # agents/search_agent.py
 import os
 import json
-from utils.helpers import google_search
+from utils.helpers import robust_hybrid_search
 
 class SearchAgent:
     """
-    Отвечает за выполнение поисковых запросов и управление кэшем.
-    Не содержит логики LLM, является инструментом для других агентов.
+    Гибридный поисковый агент с поддержкой Google и Serper, механизмом фолбэка
+    и интеллектуальным дросселированием для снижения нагрузки на API.
     """
-    def __init__(self, api_key: str, cx_id: str, cache_dir: str):
-        self.api_key = api_key
-        self.cx_id = cx_id
+    def __init__(self, google_api_key, google_cx_id, serper_api_key, cache_dir, primary_api='serper'):
+        self.google_api_key = google_api_key
+        self.google_cx_id = google_cx_id
+        self.serper_api_key = serper_api_key
+        self.primary_api = primary_api
         self.cache_path = os.path.join(cache_dir, "raw_search_cache.json")
         self.cache = self._load_cache()
-        print("-> SearchAgent инициализирован и готов к работе.")
+        print(f"-> SearchAgent (Гибридный) инициализирован. Основной API: {self.primary_api.upper()}")
 
     def _load_cache(self) -> dict:
         """Загружает кэш из файла при инициализации."""
@@ -41,19 +43,15 @@ class SearchAgent:
     def search(self, query: str) -> dict:
         """
         Основной метод. Проверяет кэш, и если запроса там нет,
-        выполняет поиск через Google API и обновляет кэш.
+        выполняет гибридный поиск и обновляет кэш.
         """
-        # Нормализуем запрос для консистентности ключей в кэше
         normalized_query = query.strip().lower()
-
         if normalized_query in self.cache:
             print(f"   [Кэш] Результат для '{query}' найден в кэше.")
             return self.cache[normalized_query]
         
-        # Если в кэше нет, выполняем реальный поиск
-        results = google_search(normalized_query, self.api_key, self.cx_id)
+        results = robust_hybrid_search(normalized_query)
         
-        # Если поиск прошел без ошибок, добавляем в кэш и сохраняем
         if "error" not in results:
             self.cache[normalized_query] = results
             self._save_cache()

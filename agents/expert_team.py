@@ -1,6 +1,6 @@
 # agents/expert_team.py
 import json
-from utils.helpers import parse_json_from_response, format_search_results_for_llm
+from utils.helpers import robust_json_parser, format_search_results_for_llm
 
 class ExpertTeam:
     """
@@ -82,7 +82,7 @@ class ExpertTeam:
 Твой результат:"""
         llm = self._get_llm_for_expert(assignee)
         response = llm.invoke(prompt)
-        queries = parse_json_from_response(response.content)
+        queries = robust_json_parser(response.content)
         
         if queries and isinstance(queries, list):
             print(f"   [Эксперт {assignee}] Шаг 1/5: Сгенерированы поисковые запросы: {queries}")
@@ -134,7 +134,7 @@ class ExpertTeam:
 Твой результат:"""
         llm = self._get_llm_for_expert(assignee)
         response = llm.invoke(prompt)
-        claims = parse_json_from_response(response.content)
+        claims = robust_json_parser(response.content)
 
         if claims and isinstance(claims, list):
             print(f"   [Эксперт {assignee}] Шаг 2/5: Создан черновик из {len(claims)} утверждений.")
@@ -172,7 +172,7 @@ class ExpertTeam:
 
 Твой аудиторский отчет:"""
         response = self.llms["expert_flash"].invoke(prompt) # Аудитор всегда "умный"
-        vulnerabilities = parse_json_from_response(response.content)
+        vulnerabilities = robust_json_parser(response.content)
 
         if vulnerabilities and isinstance(vulnerabilities, dict):
             print(f"   [Аудитор] Шаг 3/5: Проведена проверка, найдены уязвимости.")
@@ -207,7 +207,7 @@ class ExpertTeam:
 Твой финальный, исправленный результат (в формате списка JSON-объектов):"""
         llm = self._get_llm_for_expert(assignee)
         response = llm.invoke(prompt)
-        final_claims = parse_json_from_response(response.content)
+        final_claims = robust_json_parser(response.content)
 
         if final_claims and isinstance(final_claims, list):
             print(f"   [Эксперт {assignee}] Шаг 4/5: Утверждения финализированы с учетом аудита.")

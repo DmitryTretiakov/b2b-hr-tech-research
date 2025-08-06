@@ -14,7 +14,7 @@ class WorldModel:
         self.output_dir = output_dir
         self.kb_dir = os.path.join(output_dir, "knowledge_base")
         self.log_dir = os.path.join(output_dir, "logs")
-        self.cache_dir = os.path.join(output_dir, "cache") # Добавлено для полноты
+        self.cache_dir = os.path.join(output_dir, "cache")
         
         # Создаем все директории, если их нет
         os.makedirs(self.kb_dir, exist_ok=True)
@@ -94,7 +94,7 @@ class WorldModel:
                 json.dump(transaction, f, ensure_ascii=False, indent=2)
             print(f"   [WorldModel] Транзакция {tx_id} залогирована.")
         except Exception as e:
-            print(f"!!! ОШИБКА: Не удалось сохранить лог транзакции. Ошибка: {e}")
+            print(f"!!! ОШИБКА: Не удалось сохранить лог транзакции {tx_id}. Ошибка: {e}")
         
     def get_full_context(self) -> dict:
         """Возвращает полный слепок текущего состояния для агентов."""

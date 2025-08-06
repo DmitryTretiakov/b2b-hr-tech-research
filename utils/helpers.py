@@ -3,11 +3,96 @@ import os
 import requests
 import re
 import json
+import time
+from serpapi import SerpApiClient
+
+def robust_hybrid_search(query: str, num_results: int = 10) -> dict:
+    """
+    Выполняет поиск, используя Serper как основной API и Google Custom Search как резервный.
+    Оба API имеют механизм повторных попыток.
+    """
+    # --- Попытка №1: Основной API (Serper) ---
+    serpapi_key = os.getenv("SERPAPI_API_KEY")
+    if serpapi_key:
+        print(f"    -> [Поиск Serper] Выполняю запрос: '{query}'...")
+        retries = 3
+        delay = 2
+        for i in range(retries):
+            try:
+                params = {
+                    "q": query, "api_key": serpapi_key, "engine": "google",
+                    "gl": "ru", "hl": "ru",
+                }
+                # ВАЖНО: Устанавливаем таймаут прямо в клиенте
+                client = SerpApiClient(params_dict=params, timeout=30)
+                results = client.get_dict()
+                
+                if "organic_results" in results:
+                    formatted_results = {
+                        "items": [{"title": item.get("title"), "link": item.get("link"), "snippet": item.get("snippet")}
+                                  for item in results["organic_results"][:num_results]]
+                    }
+                    print(f"    <- [Поиск Serper] Ответ получен и обработан.")
+                    return formatted_results
+                else:
+                    # Если нет результатов, но и не ошибка, значит поиск пуст
+                    print(f"   [Поиск Serper] Запрос выполнен, но органические результаты не найдены.")
+                    break # Прерываем попытки, переходим к резервному API
+
+            except Exception as e:
+                print(f"   [Поиск Serper] !!! ОШИБКА: {e}. Попытка {i+1}/{retries}. Жду {delay} сек...")
+                time.sleep(delay)
+                delay *= 2
+        
+        print(f"!!! [SearchAgent] Основной API (Serper) не справился после {retries} попыток.")
+
+    # --- Попытка №2: Резервный API (Google Custom Search) ---
+    google_api_key = os.getenv("GOOGLE_SEARCH_API_KEY")
+    google_cx_id = os.getenv("SEARCH_ENGINE_ID")
+    if google_api_key and google_cx_id:
+        print(f"!!! [SearchAgent] Переключаюсь на резервный API (Google)...")
+        # Используем старую, надежную функцию с retry
+        return google_search_legacy(query, google_api_key, google_cx_id, num_results)
+
+    print("!!! КРИТИЧЕСКАЯ ОШИБКА ПОИСКА: Все API недоступны или не справились.")
+    return {"error": "Все поисковые API провалились."}
+
+
+def google_search_legacy(query: str, api_key: str, cx_id: str, num_results: int) -> dict:
+    """Резервная функция поиска через Google API с механизмом повторных попыток."""
+    url = "https://www.googleapis.com/customsearch/v1"
+    params = {'key': api_key, 'cx': cx_id, 'q': query, 'num': num_results}
+    retries = 3
+    delay = 2
+    
+    print(f"    -> [Поиск Google] Выполняю запрос: '{query}'...")
+    for i in range(retries):
+        try:
+            response = requests.get(url, params=params, timeout=20)
+            response.raise_for_status()
+            print(f"    <- [Поиск Google] Ответ получен.")
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:
+                print(f"   [Поиск Google] !!! Внимание: Получен статус 429 (Too Many Requests). Попытка {i+1}/{retries}. Жду {delay} сек...")
+                time.sleep(delay)
+                delay *= 2
+                continue
+            else:
+                print(f"!!! СЕТЕВАЯ ОШИБКА HTTP (Google): {e}")
+                return {"error": str(e)}
+        except Exception as e:
+            print(f"!!! СЕТЕВАЯ ОШИБКА (Google): {e}")
+            time.sleep(delay)
+            delay *= 2
+            continue
+            
+    print(f"!!! КРИТИЧЕСКАЯ ОШИБКА ПОИСКА (Google): Все {retries} попытки провалились.")
+    return {"error": f"Все {retries} попытки для Google API провалились."}
 
 def google_search(query: str, api_key: str, cx_id: str, num_results: int = 10) -> dict:
     """
-    Выполняет поиск через Google Custom Search API.
-    (ИЗМЕНЕНИЕ: num_results по умолчанию увеличен до 10 для большей глубины)
+    Выполняет поиск через Google Custom Search API с механизмом повторных попыток.
     Возвращает сырой JSON ответа или словарь с ключом 'error'.
     """
     if not api_key or not cx_id:
@@ -17,50 +102,87 @@ def google_search(query: str, api_key: str, cx_id: str, num_results: int = 10) -
     url = "https://www.googleapis.com/customsearch/v1"
     params = {'key': api_key, 'cx': cx_id, 'q': query, 'num': num_results}
     
+    retries = 3
+    delay = 2 # Начальная задержка в секундах
+    
     print(f"    -> [Поиск] Выполняю запрос: '{query}'...")
-    try:
-        response = requests.get(url, params=params, timeout=20)
-        response.raise_for_status() # Проверка на ошибки HTTP (4xx, 5xx)
-        print(f"    <- [Поиск] Ответ получен.")
-        return response.json()
-    except requests.exceptions.Timeout:
-        print(f"!!! СЕТЕВАЯ ОШИБКА: Таймаут (20с) при поиске по запросу '{query}'")
-        return {"error": "Таймаут запроса."}
-    except requests.exceptions.RequestException as e:
-        print(f"!!! СЕТЕВАЯ ОШИБКА: {e}")
-        return {"error": str(e)}
+    for i in range(retries):
+        try:
+            response = requests.get(url, params=params, timeout=20)
+            response.raise_for_status() # Проверка на ошибки HTTP (4xx, 5xx)
+            print(f"    <- [Поиск] Ответ получен.")
+            return response.json()
+        
+        except requests.exceptions.HTTPError as e:
+            # Особая обработка ошибки "Too Many Requests"
+            if e.response.status_code == 429:
+                print(f"   [Поиск] !!! Внимание: Получен статус 429 (Too Many Requests). Попытка {i+1}/{retries}. Жду {delay} сек...")
+                time.sleep(delay)
+                delay *= 2 # Увеличиваем задержку для следующей попытки
+                continue
+            else:
+                print(f"!!! СЕТЕВАЯ ОШИБКА HTTP: {e}")
+                return {"error": str(e)}
+        
+        except requests.exceptions.Timeout:
+            print(f"!!! СЕТЕВАЯ ОШИБКА: Таймаут (20с) при поиске по запросу '{query}'. Попытка {i+1}/{retries}.")
+            time.sleep(delay)
+            delay *= 2
+            continue
+            
+        except requests.exceptions.RequestException as e:
+            print(f"!!! СЕТЕВАЯ ОШИБКА: {e}")
+            return {"error": str(e)}
 
-def parse_json_from_response(text: str) -> any:
+    print(f"!!! КРИТИЧЕСКАЯ ОШИБКА ПОИСКА: Все {retries} попытки для запроса '{query}' провалились.")
+    return {"error": f"Все {retries} попытки провалились."}
+
+
+def robust_json_parser(text: str) -> any:
     """
-    Надежно извлекает и парсит JSON из текстового ответа LLM.
-    Справляется с markdown-блоками, окружающим текстом и ошибками.
+    Улучшенная версия парсера. Ищет JSON более агрессивно.
     """
     if not isinstance(text, str):
         print("!!! ОШИБКА ПАРСИНГА: Входные данные не являются строкой.")
         return None
 
-    # Ищем JSON внутри markdown-блока ```json ... ```
+    # 1. Попытка найти JSON в markdown-блоке
     match = re.search(r'```json\s*([\s\S]*?)\s*```', text, re.DOTALL)
     if match:
         json_str = match.group(1).strip()
-    else:
-        # Если не нашли markdown, ищем первый '{' или '[' и последний '}' или ']'
-        start_curly = text.find('{')
-        end_curly = text.rfind('}')
-        start_square = text.find('[')
-        end_square = text.rfind(']')
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            print("!!! ОШИБКА ПАРСИНГА: Найден markdown-блок, но внутри невалидный JSON.")
+            # Продолжаем, чтобы попробовать другие методы
 
-        if start_curly != -1 and end_curly != -1:
-            json_str = text[start_curly:end_curly+1]
-        elif start_square != -1 and end_square != -1:
-            json_str = text[start_square:end_square+1]
-        else:
-            json_str = text
+    # 2. Попытка найти первый '{' или '[' и последний '}' или ']'
+    start = -1
+    end = -1
+    
+    start_curly = text.find('{')
+    end_curly = text.rfind('}')
+    start_square = text.find('[')
+    end_square = text.rfind(']')
 
+    if start_curly != -1 and end_curly != -1:
+        start, end = start_curly, end_curly + 1
+    elif start_square != -1 and end_square != -1:
+        start, end = start_square, end_square + 1
+    
+    if start != -1:
+        json_str = text[start:end]
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            print(f"!!! ОШИБКА ПАРСИНГА: Не удалось распарсить фрагмент.")
+            # Продолжаем, чтобы попробовать последнюю попытку
+
+    # 3. Последняя попытка: просто пытаемся распарсить весь текст
     try:
-        return json.loads(json_str)
+        return json.loads(text)
     except json.JSONDecodeError:
-        print(f"!!! ОШИБКА ПАРСИНГА JSON: Не удалось извлечь валидный JSON.")
+        print(f"!!! КРИТИЧЕСКАЯ ОШИБКА ПАРСИНГА: Не удалось извлечь валидный JSON из ответа.")
         return None
 
 def sanitize_filename(text: str) -> str:
@@ -80,21 +202,23 @@ def sanitize_filename(text: str) -> str:
     text = re.sub(r'[\s-]+', '_', text).strip('_')
     return text[:70]
 
+
 def format_search_results_for_llm(search_results: dict) -> str:
     """
-    Форматирует сырой JSON от Google Search в удобную для LLM строку.
+    Форматирует сырой JSON от Google Search и Serper в удобную для LLM строку.
     """
-    if "error" in search_results or not search_results.get("items"):
+    # Serper использует ключ 'organic', Google - 'items'
+    items = search_results.get("organic", search_results.get("items", []))
+    
+    if "error" in search_results or not items:
         return "Поиск не дал результатов или произошла ошибка."
     
     snippets = []
-    for i, item in enumerate(search_results.get("items", [])):
-        snippet = (
-            f"--- Результат Поиска #{i+1} ---\n"
-            f"Источник: {item.get('link', 'N/A')}\n"
-            f"Заголовок: {item.get('title', 'N/A')}\n"
-            f"Фрагмент: {item.get('snippet', 'N/A')}\n"
-        )
+    for i, item in enumerate(items):
+        snippet = (f"--- Результат Поиска #{i+1} ---\n"
+                   f"Источник: {item.get('link', 'N/A')}\n"
+                   f"Заголовок: {item.get('title', 'N/A')}\n"
+                   f"Фрагмент: {item.get('snippet', 'N/A')}\n")
         snippets.append(snippet)
     
     return "\n".join(snippets)
