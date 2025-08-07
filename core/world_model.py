@@ -2,9 +2,8 @@
 import json
 import os
 from datetime import datetime
-
-# Убираем импорт sanitize_filename, так как он больше не используется в этом файле
-# from utils.helpers import sanitize_filename 
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from core.semantic_index import SemanticIndex
 
 class WorldModel:
     """
@@ -19,19 +18,26 @@ class WorldModel:
         self.log_dir = os.path.join(output_dir, "logs")
         self.cache_dir = os.path.join(output_dir, "cache")
         
-        # --- НОВЫЙ АТРИБУТ ДЛЯ ФАЙЛА СОСТОЯНИЯ ---
+        # Определяем пути для всех персистентных артефактов
         self.state_file_path = os.path.join(self.output_dir, "system_state.json")
-        if force_fresh_start and os.path.exists(self.state_file_path):
-            print(f"!!! [WorldModel] Активирован режим 'fresh-start'. Удаляю старый файл состояния: {self.state_file_path}")
-            try:
-                os.remove(self.state_file_path)
-            except OSError as e:
-                print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось удалить файл состояния. Ошибка: {e}")
+        self.index_path = os.path.join(self.output_dir, "faiss.index")
+        self.id_map_path = os.path.join(self.output_dir, "id_map.json")
+
+        # Обрабатываем флаг --fresh-start, удаляя все старые данные
+        if force_fresh_start:
+            print("!!! [WorldModel] Активирован режим 'fresh-start'. Удаляю старые файлы состояния и индекса.")
+            if os.path.exists(self.state_file_path): os.remove(self.state_file_path)
+            if os.path.exists(self.index_path): os.remove(self.index_path)
+            if os.path.exists(self.id_map_path): os.remove(self.id_map_path)
                 
         # Создаем все директории, если их нет
         os.makedirs(self.kb_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)
         os.makedirs(self.cache_dir, exist_ok=True)
+
+        # Инициализируем семантический индекс
+        embedding_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+        self.semantic_index = SemanticIndex(embedding_model=embedding_model)
 
         # Инициализируем пустое состояние по умолчанию
         self.dynamic_knowledge = {
@@ -40,10 +46,25 @@ class WorldModel:
             "transaction_log": []
         }
         
-        # --- НОВЫЙ ВЫЗОВ: ПЫТАЕМСЯ ЗАГРУЗИТЬ СОСТОЯНИЕ ПРИ СТАРТЕ ---
+        # --- Новая, отказоустойчивая логика загрузки ---
+        # 1. Сначала пытаемся загрузить персистентный индекс с диска
+        index_loaded = self.semantic_index.load_from_disk(self.index_path, self.id_map_path)
+        
+        # 2. Затем пытаемся загрузить основное состояние (план, KB)
         self._load_state_from_disk()
 
-        print("-> WorldModel инициализирован (состояние загружено, если найдено).")
+        # 3. Сверяем состояние. Если База Знаний загрузилась, а индекс - нет,
+        #    запускаем аварийную перестройку индекса.
+        if self.dynamic_knowledge['knowledge_base'] and not index_loaded:
+            print("!!! [WorldModel] Обнаружена База Знаний, но отсутствует семантический индекс. Запускаю перестройку...")
+            self.semantic_index.rebuild_from_kb(
+                self.dynamic_knowledge['knowledge_base'], 
+                self.index_path, 
+                self.id_map_path
+            )
+
+        print("-> WorldModel инициализирован (состояние и индекс загружены, если найдены).")
+
     def add_task_to_plan(self, task: dict, phase_name: str = "Phase 1: Глубокая Разведка Активов ТГУ"):
         """
         Добавляет новую задачу в указанную или активную фазу плана.
@@ -119,11 +140,11 @@ class WorldModel:
 
     def add_claims_to_kb(self, claims: list):
         """
-        Добавляет или ОБНОВЛЯЕТ список "Утверждений" в базе знаний и СОХРАНЯЕТ СОСТОЯНИЕ.
-        Теперь может обрабатывать и одиночные утверждения.
+        Добавляет или обновляет "Утверждения" в базе знаний, обновляет семантический индекс
+        и сохраняет общее состояние на диск.
         """
         if not isinstance(claims, list):
-            claims = [claims] # Оборачиваем одиночный claim в список
+            claims = [claims] # Позволяет работать с одиночными утверждениями
 
         if not claims:
             return
@@ -131,11 +152,26 @@ class WorldModel:
         added_count = 0
         for claim in claims:
             if isinstance(claim, dict) and 'claim_id' in claim:
-                self.dynamic_knowledge["knowledge_base"][claim['claim_id']] = claim
+                claim_id = claim['claim_id']
+                is_new = claim_id not in self.dynamic_knowledge["knowledge_base"]
+                
+                # Обновляем/добавляем утверждение в Базу Знаний
+                self.dynamic_knowledge["knowledge_base"][claim_id] = claim
+                
+                # Если утверждение новое, добавляем его в семантический индекс.
+                # Метод add_claim внутри себя处理 инкрементальное сохранение индекса.
+                if is_new:
+                    self.semantic_index.add_claim(
+                        claim_id, 
+                        claim['statement'],
+                        self.index_path,
+                        self.id_map_path
+                    )
                 added_count += 1
         
         if added_count > 0:
             print(f"   [WorldModel] Добавлено/обновлено {added_count} утверждений в Базе Знаний.")
+            # Сохраняем основной файл состояния (plan, kb, log)
             self._save_state_to_disk()
 
     def update_task_status(self, task_id: str, new_status: str):
