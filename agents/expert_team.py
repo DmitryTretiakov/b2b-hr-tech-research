@@ -39,6 +39,17 @@ class AuditReport(BaseModel):
 class NLIReport(BaseModel):
     """Описывает результат анализа взаимосвязи двух утверждений."""
     relationship: Literal["CONTRADICTS", "SUPPORTS", "NEUTRAL"] = Field(description="Отношение второго утверждения к первому.")
+class SourceAuditResult(BaseModel):
+    """Результат аудита для одного источника."""
+    source_type: Literal[
+        "OFFICIAL_DOCS", "MAJOR_TECH_MEDIA", "ACADEMIC_PAPER", 
+        "COMPANY_BLOG", "PRESS_RELEASE", "NEWS_ARTICLE", 
+        "MARKETING_CONTENT", "FORUM_POST", "UNKNOWN"
+    ] = Field(description="Тип источника, выбранный из допустимого списка.")
+
+class BatchAuditReport(BaseModel):
+    """Отчет аудитора по пакету источников."""
+    audit_results: Dict[str, SourceAuditResult] = Field(description="Словарь, где ключ - это URL источника, а значение - результат его аудита.")
 
 SOURCE_TRUST_MULTIPLIERS = {
     "OFFICIAL_DOCS": 1.0,      # Официальная документация продукта или технологии
@@ -93,7 +104,50 @@ class ExpertTeam:
             return "да" in response.content.lower()
         except Exception:
             return False # В случае ошибки считаем, что не связаны
+    def _batch_audit_sources(self, urls: List[str]) -> Dict[str, dict]:
+        """
+        Классифицирует пакет URL одним вызовом LLM и возвращает словарь с типами и коэффициентами доверия.
+        """
+        if not urls:
+            return {}
+            
+        print(f"      [Пакетный Аудитор] -> Классифицирую {len(urls)} уникальных URL одним запросом...")
+        # Используем быструю и дешевую модель для этой задачи
+        auditor_llm = self.llms["source_auditor"] 
+        
+        # Формируем описание типов и список URL для промпта
+        source_types_list = list(SOURCE_TRUST_MULTIPLIERS.keys())
+        urls_to_analyze = "\n".join([f'- "{url}"' for url in urls])
 
+        prompt = f"""**ТВОЯ ЗАДАЧА:** Ты — AI-ассистент, классифицирующий веб-источники. Тебе предоставлен список URL. Для КАЖДОГО URL ты должен определить его тип.
+
+**СПИСОК ДОПУСТИМЫХ ТИПОВ ИСТОЧНИКОВ:**
+{source_types_list}
+
+**URL ДЛЯ АНАЛИЗА:**
+{urls_to_analyze}
+
+**ИНСТРУКЦИЯ:** Верни результат в виде ОДНОГО JSON-объекта. Ключами в этом объекте должны быть предоставленные URL, а значениями — объекты с единственным полем 'source_type'. Если URL не соответствует ни одному типу или ссылка не работает, используй тип 'UNKNOWN'.
+"""
+        
+        report = self._invoke_llm_for_json(auditor_llm, prompt, BatchAuditReport)
+        
+        processed_report = {}
+        if report and 'audit_results' in report:
+            for url, result_data in report['audit_results'].items():
+                # Pydantic уже провалидировал тип, поэтому мы можем ему доверять
+                source_type = result_data.get('source_type', 'UNKNOWN')
+                trust = SOURCE_TRUST_MULTIPLIERS.get(source_type, 0.2)
+                processed_report[url] = {"type": source_type, "trust": trust}
+            print(f"      [Пакетный Аудитор] <- Успешно обработано {len(processed_report)} URL.")
+        else:
+            print(f"      [Пакетный Аудитор] !!! Пакетный аудит не вернул результатов. Для всех URL будет использован тип 'UNKNOWN'.")
+            # Отказоустойчивость: если LLM не справился, присваиваем всем UNKNOWN
+            for url in urls:
+                processed_report[url] = {"type": "UNKNOWN", "trust": 0.2}
+
+        return processed_report
+    
     # --- НОВЫЙ МЕТОД ДЛЯ NLI-АУДИТА ---
     def _perform_nli_audit(self, claim_A: dict, claim_B: dict) -> str:
         """Проверяет два связанных утверждения на предмет противоречия."""
@@ -171,16 +225,38 @@ URL: "{url}"
         draft_claims = draft_claims_dict.get('claims', [])
         if not draft_claims: return []
 
-        # 3.5 Аудит источников
-        print(f"   [Эксперт {assignee}] Шаг 3.5/6: Провожу аудит источников...")
+        # 3.5 Пакетный аудит источников
+        print(f"   [Эксперт {assignee}] Шаг 3.5/6: Запускаю пакетный аудит источников...")
+        
+        # 3.5.1: Собрать все уникальные URL из черновиков утверждений
+        unique_urls = list(set(
+            claim['source_link'] 
+            for claim in draft_claims 
+            if 'source_link' in claim and claim['source_link']
+        ))
+        
+        # 3.5.2: Вызвать пакетный метод ОДИН РАЗ
+        batch_audit_report = self._batch_audit_sources(unique_urls)
+        
+        # 3.5.3: Обогатить утверждения результатами пакетного аудита
         enriched_claims = []
         for claim in draft_claims:
-            source_audit_results = self._audit_source(claim['source_link'])
-            claim['source_type'] = source_audit_results['type']
-            claim['source_trust'] = source_audit_results['trust']
-            claim['confidence_score'] *= source_audit_results['trust']
+            url = claim.get('source_link')
+            
+            # Получаем результат аудита из словаря, с безопасным фолбэком
+            audit_result = batch_audit_report.get(url, {"type": "UNKNOWN", "trust": 0.2})
+            
+            claim['source_type'] = audit_result['type']
+            claim['source_trust'] = audit_result['trust']
+            
+            # Пересчитываем confidence_score с учетом доверия к источнику
+            # Используем get с дефолтным значением на случай, если LLM не сгенерировал confidence_score
+            base_confidence = claim.get('confidence_score', 0.7) 
+            claim['confidence_score'] = base_confidence * audit_result['trust']
+            
             enriched_claims.append(claim)
-        print(f"   [Эксперт {assignee}] -> Аудит источников завершен.")
+            
+        print(f"   [Эксперт {assignee}] -> Пакетный аудит и обогащение {len(enriched_claims)} утверждений завершены.")
 
         # 4. Аудит содержимого
         vulnerabilities_dict = self._audit_claims(enriched_claims, world_model_context)

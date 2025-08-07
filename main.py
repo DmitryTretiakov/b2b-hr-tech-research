@@ -49,7 +49,7 @@ def main():
         print("   [!!! ВНИМАНИЕ] GOOGLE_SEARCH_API_KEY НЕ найден.")
     print("---------------------------------\n")
     # --- КОНЕЦ ДИАГНОСТИКИ ---
-    
+
     # ИНИЦИАЛИЗАЦИЯ LLM С ТОНКОЙ НАСТРОЙКОЙ ТЕМПЕРАТУРЫ
     try:
         llms = {
@@ -212,30 +212,74 @@ def main():
         print(f"   [Оркестратор] Пауза после задачи на {TASK_COOLDOWN_SECONDS} секунд...")
         time.sleep(TASK_COOLDOWN_SECONDS)
 
-    # --- ФИНАЛЬНЫЙ ОТЧЕТ ---
-    print("\n--- Создание финальных отчетов... ---")
-    
-    # 1. Создание краткой записки
-    executive_summary = strategist.write_executive_summary(world_model.get_full_context())
-    summary_file_path = os.path.join(world_model.output_dir, "Executive_Summary_For_Director.md")
-    try:
-        # ИСПРАВЛЕНИЕ: Гарантируем, что на запись идет строка
-        with open(summary_file_path, "w", encoding="utf-8") as f:
-            f.write(str(executive_summary)) 
-        print(f"-> Краткая аналитическая записка сохранена в {summary_file_path}")
-    except Exception as e:
-        print(f"!!! ОШИБКА: Не удалось сохранить краткую записку. Ошибка: {e}")
+    # --- ФИНАЛЬНЫЙ ОТЧЕТ С ЦИКЛОМ ВАЛИДАЦИИ ---
+    print("\n--- Создание и валидация финальных отчетов... ---")
+    MAX_VALIDATION_RETRIES = 3
 
-    # 2. Создание подробного обзора
-    extended_brief = strategist.write_extended_brief(world_model.get_full_context())
+    # --- Генерация и валидация Executive Summary ---
+    summary_content = ""
+    for i in range(MAX_VALIDATION_RETRIES):
+        print(f"\n   -> Попытка {i+1}/{MAX_VALIDATION_RETRIES} генерации Executive Summary...")
+        feedback = summary_content # Используем предыдущий неудачный результат как фидбэк
+        
+        # Генерируем черновик
+        draft_summary = strategist.write_executive_summary(world_model.get_full_context(), feedback=feedback)
+        
+        # Валидируем черновик
+        validation_report = strategist.validate_artifact(
+            draft_summary, 
+            required_sections=["Executive Summary", "Концепция Продукта", "Дорожная Карта"]
+        )
+        
+        if validation_report.get("is_valid"):
+            summary_content = draft_summary
+            print("   -> Executive Summary успешно сгенерирован и прошел валидацию.")
+            break # Выходим из цикла, если все хорошо
+        else:
+            # Сохраняем причины провала для следующей итерации
+            summary_content = f"Validation failed. Reasons: {validation_report.get('reasons', [])}"
+            print(f"   !!! Попытка {i+1} провалена. Отправляю на доработку...")
+            time.sleep(10) # Небольшая пауза перед повторной попыткой
+
+    # Сохраняем результат (успешный или отчет об ошибке)
+    summary_file_path = os.path.join(world_model.output_dir, "Executive_Summary_For_Director.md")
+    if summary_content and "Validation failed" not in summary_content:
+        with open(summary_file_path, "w", encoding="utf-8") as f:
+            f.write(summary_content)
+        print(f"-> Краткая аналитическая записка сохранена в {summary_file_path}")
+    else:
+        with open(summary_file_path, "w", encoding="utf-8") as f:
+            f.write(f"# ГЕНЕРАЦИЯ ПРОВАЛЕНА\n\nНе удалось создать качественный документ после {MAX_VALIDATION_RETRIES} попыток.\n\nПоследняя ошибка: {summary_content}")
+        print(f"!!! ОШИБКА: Не удалось сгенерировать Executive Summary. Отчет об ошибке сохранен в {summary_file_path}")
+
+    # --- Генерация и валидация Extended Brief (аналогичный цикл) ---
+    brief_content = ""
+    for i in range(MAX_VALIDATION_RETRIES):
+        print(f"\n   -> Попытка {i+1}/{MAX_VALIDATION_RETRIES} генерации Extended Brief...")
+        feedback = brief_content
+        draft_brief = strategist.write_extended_brief(world_model.get_full_context(), feedback=feedback)
+        validation_report = strategist.validate_artifact(
+            draft_brief,
+            required_sections=["Анализ Активов ТГУ", "Конкурентный Ландшафт", "Бизнес-Кейс"]
+        )
+        if validation_report.get("is_valid"):
+            brief_content = draft_brief
+            print("   -> Extended Brief успешно сгенерирован и прошел валидацию.")
+            break
+        else:
+            brief_content = f"Validation failed. Reasons: {validation_report.get('reasons', [])}"
+            print(f"   !!! Попытка {i+1} провалена. Отправляю на доработку...")
+            time.sleep(10)
+
     brief_file_path = os.path.join(world_model.output_dir, "Extended_Brief_For_PO.md")
-    try:
-        # ИСПРАВЛЕНИЕ: Гарантируем, что на запись идет строка
+    if brief_content and "Validation failed" not in brief_content:
         with open(brief_file_path, "w", encoding="utf-8") as f:
-            f.write(str(extended_brief))
+            f.write(brief_content)
         print(f"-> Подробный аналитический обзор сохранен в {brief_file_path}")
-    except Exception as e:
-        print(f"!!! ОШИБКА: Не удалось сохранить подробный обзор. Ошибка: {e}")
+    else:
+        with open(brief_file_path, "w", encoding="utf-8") as f:
+            f.write(f"# ГЕНЕРАЦИЯ ПРОВАЛЕНА\n\nНе удалось создать качественный документ после {MAX_VALIDATION_RETRIES} попыток.\n\nПоследняя ошибка: {brief_content}")
+        print(f"!!! ОШИБКА: Не удалось сгенерировать Extended Brief. Отчет об ошибке сохранен в {brief_file_path}")
         
     print(f"\n--- РАБОТА УСПЕШНО ЗАВЕРШЕНА ---")
 
