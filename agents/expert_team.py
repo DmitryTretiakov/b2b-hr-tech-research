@@ -1,5 +1,6 @@
 # agents/expert_team.py
 import json
+import os
 import time
 import uuid
 from pydantic import BaseModel, Field 
