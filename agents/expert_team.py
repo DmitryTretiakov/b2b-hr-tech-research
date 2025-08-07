@@ -1,5 +1,6 @@
 # agents/expert_team.py
 import json
+import time
 import uuid
 from pydantic import BaseModel, Field 
 from typing import List, Literal, Dict
@@ -46,6 +47,15 @@ class SourceAuditResult(BaseModel):
         "COMPANY_BLOG", "PRESS_RELEASE", "NEWS_ARTICLE", 
         "MARKETING_CONTENT", "FORUM_POST", "UNKNOWN"
     ] = Field(description="Тип источника, выбранный из допустимого списка.")
+
+class NLIResult(BaseModel):
+    """Описывает результат сравнения одного нового утверждения с одним существующим."""
+    existing_claim_id: str = Field(description="ID существующего утверждения, с которым проводилось сравнение.")
+    relationship: Literal["CONTRADICTS", "SUPPORTS", "NEUTRAL"] = Field(description="Отношение нового утверждения к существующему.")
+
+class BatchNLIReport(BaseModel):
+    """Описывает полный отчет по пакетному сравнению одного нового утверждения с несколькими существующими."""
+    audit_results: List[NLIResult] = Field(description="Список результатов сравнения для каждой пары.")
 
 class BatchAuditReport(BaseModel):
     """Отчет аудитора по пакету источников."""
@@ -148,25 +158,49 @@ class ExpertTeam:
 
         return processed_report
     
-    # --- НОВЫЙ МЕТОД ДЛЯ NLI-АУДИТА ---
-    def _perform_nli_audit(self, claim_A: dict, claim_B: dict) -> str:
-        """Проверяет два связанных утверждения на предмет противоречия."""
-        print(f"      [NLI Аудитор] -> Найдена связь. Проверяю на противоречие...")
-        llm = self.llms["expert_flash"] # Используем более мощную модель для NLI
-        
-        prompt = f"""Твоя задача - определить логическое отношение между двумя утверждениями.
-Утверждение А (существующее в базе): "{claim_A['statement']}" (Значение: {claim_A['value']})
-Утверждение Б (новое): "{claim_B['statement']}" (Значение: {claim_B['value']})
+    def _batch_nli_audit(self, new_claim: dict, existing_claims: List[dict]) -> List[dict]:
+        """
+        Проверяет одно новое утверждение против списка существующих одним пакетным вызовом LLM.
+        """
+        if not existing_claims:
+            return []
 
-Противоречит ли Утверждение Б Утверждению А?
-- CONTRADICTS: Если утверждения не могут быть истинными одновременно.
-- SUPPORTS: Если одно утверждение поддерживает или подтверждает другое.
-- NEUTRAL: Если утверждения о разном или не связаны логически.
+        print(f"      [Пакетный NLI Аудитор] -> Сравниваю '{new_claim['claim_id']}' с {len(existing_claims)} кандидатами...")
+        llm = self.llms["expert_flash"] # Надежная модель для NLI
+
+        # Формируем текст существующих утверждений для промпта
+        existing_claims_text = "\n".join(
+            [f"- ID: {c['claim_id']}, Утверждение: \"{c['statement']}\" (Значение: {c['value']})" for c in existing_claims]
+        )
+
+        prompt = f"""**ТВОЯ ЗАДАЧА:** Ты — AI-аудитор, специализирующийся на поиске логических противоречий.
+Твоя цель — определить логическое отношение между одним **НОВЫМ УТВЕРЖДЕНИЕМ** и списком **СУЩЕСТВУЮЩИХ УТВЕРЖДЕНИЙ**.
+
+**НОВОЕ УТВЕРЖДЕНИЕ (Основное для сравнения):**
+- ID: {new_claim['claim_id']}
+- Утверждение: "{new_claim['statement']}" (Значение: {new_claim['value']})
+
+**СУЩЕСТВУЮЩИЕ УТВЕРЖДЕНИЯ (Кандидаты для сравнения):**
+{existing_claims_text}
+
+**ИНСТРУКЦИИ:**
+Для КАЖДОГО существующего утверждения из списка, определи его отношение к НОВОМУ утверждению.
+Возможные отношения:
+- **CONTRADICTS:** Если утверждения не могут быть истинными одновременно.
+- **SUPPORTS:** Если одно утверждение поддерживает или подтверждает другое.
+- **NEUTRAL:** Если утверждения о разном или не связаны логически.
+
+Верни результат в виде ОДНОГО JSON-объекта, соответствующего предоставленной схеме.
 """
-        report = self._invoke_llm_for_json(llm, prompt, NLIReport)
-        relationship = report.get("relationship", "NEUTRAL")
-        print(f"      [NLI Аудитор] <- Результат: {relationship}")
-        return relationship
+        
+        report = self._invoke_llm_for_json(llm, prompt, BatchNLIReport)
+        
+        # --- Дросселирование ПОСЛЕ вызова. 10 RPM -> 6с/запрос ---
+        # Мы все еще делаем K вызовов, поэтому оставляем защиту от всплесков.
+        print("         [Пакетный NLI Аудитор] Пауза 6 секунд для соблюдения лимита RPM...")
+        time.sleep(6)
+
+        return report.get("audit_results", [])
     
         
     def execute_task(self, task: dict, world_model: WorldModel) -> list:
@@ -236,7 +270,7 @@ class ExpertTeam:
         final_claims = final_claims_dict.get('claims', [])
         if not final_claims: return []
 
-        # --- ФИНАЛЬНЫЙ ШАГ 6: ИНТЕГРАЦИЯ С ИСПОЛЬЗОВАНИЕМ СЕМАНТИЧЕСКОГО ИНДЕКСА ---
+        # --- ФИНАЛЬНЫЙ ШАГ 6: ИНТЕГРАЦИЯ С ИСПОЛЬЗОВАНИЕМ ПАКЕТНОГО NLI-АУДИТА ---
         print(f"   [Эксперт {assignee}] Шаг 6/6: Провожу финальную верификацию и интеграцию {len(final_claims)} утверждений...")
         verified_claims_for_log = []
         knowledge_base = world_model_context['dynamic_knowledge']['knowledge_base']
@@ -244,28 +278,45 @@ class ExpertTeam:
         for new_claim in final_claims:
             is_conflicted = False
             
-            # 1. ОДИН быстрый вызов к индексу для поиска кандидатов
+            # 1. Найти семантически близких кандидатов (без изменений)
             similar_ids = world_model.semantic_index.find_similar_claim_ids(new_claim['statement'], top_k=5)
             
-            if similar_ids:
-                print(f"      [Детектор Связи] -> Найдены семантически близкие кандидаты: {similar_ids}")
-            
-            # 2. Дорогостоящая LLM-проверка только для 5 кандидатов, а не для всей базы
-            for existing_claim_id in similar_ids:
-                if new_claim['claim_id'] == existing_claim_id: continue
-                
-                existing_claim = knowledge_base.get(existing_claim_id)
-                if not existing_claim: continue
+            if not similar_ids:
+                # Если похожих нет, просто верифицируем утверждение
+                new_claim['status'] = 'VERIFIED'
+                world_model.add_claims_to_kb(new_claim)
+                verified_claims_for_log.append(new_claim)
+                continue
 
-                # NLI-аудит вызывается только здесь
-                relationship = self._perform_nli_audit(existing_claim, new_claim)
-                if relationship == "CONTRADICTS":
+            # 2. Собрать полные данные по найденным кандидатам
+            existing_claims_to_check = []
+            for an_id in similar_ids:
+                if an_id in knowledge_base:
+                    existing_claims_to_check.append(knowledge_base[an_id])
+            
+            if not existing_claims_to_check:
+                new_claim['status'] = 'VERIFIED'
+                world_model.add_claims_to_kb(new_claim)
+                verified_claims_for_log.append(new_claim)
+                continue
+
+            # 3. Выполнить ОДИН пакетный NLI-аудит для нового утверждения против всех кандидатов
+            audit_results = self._batch_nli_audit(new_claim, existing_claims_to_check)
+
+            # 4. Проанализировать результаты пакетного аудита
+            for result in audit_results:
+                if result.get("relationship") == "CONTRADICTS":
+                    existing_claim_id = result['existing_claim_id']
                     print(f"!!! [Детектор Противоречий] ОБНАРУЖЕН КОНФЛИКТ между '{new_claim['claim_id']}' и '{existing_claim_id}'")
                     is_conflicted = True
                     
-                    existing_claim['status'] = 'CONFLICTED'
-                    world_model.add_claims_to_kb(existing_claim)
+                    # Помечаем существующее утверждение как конфликтное
+                    conflicted_claim = knowledge_base.get(existing_claim_id)
+                    if conflicted_claim:
+                        conflicted_claim['status'] = 'CONFLICTED'
+                        world_model.add_claims_to_kb(conflicted_claim)
                     
+                    # Создаем задачу на разрешение конфликта
                     conflict_task = {
                         "task_id": f"conflict_{str(uuid.uuid4())[:8]}",
                         "assignee": "ProductOwnerAgent",
@@ -274,9 +325,9 @@ class ExpertTeam:
                         "status": "PENDING", "retry_count": 0
                     }
                     world_model.add_task_to_plan(conflict_task)
-                    break # Нашли конфликт, прекращаем проверку для этого new_claim
+                    break # Одного противоречия достаточно, чтобы пометить новое утверждение как конфликтное
 
-            # 3. Решение о судьбе нового утверждения
+            # 5. Решить судьбу нового утверждения
             if is_conflicted:
                 new_claim['status'] = 'CONFLICTED'
                 world_model.add_claims_to_kb(new_claim)

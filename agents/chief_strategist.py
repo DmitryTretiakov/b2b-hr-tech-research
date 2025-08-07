@@ -303,13 +303,22 @@ class ChiefStrategist:
     def _batch_filter_kb_by_relevance(self, knowledge_base: dict) -> dict:
         """
         Фильтрует всю базу знаний одним вызовом LLM, возвращая только коммерчески релевантные утверждения.
+        Использует быструю и дешевую модель gemini-2.5-flash для экономии.
         """
         print("   [Стратег] -> Запускаю ПАКЕТНУЮ фильтрацию Базы Знаний по коммерческой релевантности...")
         
         if not knowledge_base:
             return {}
 
-        # Формируем текст для анализа, пропуская уже отклоненные
+        # --- ИЗМЕНЕНИЕ: Инициализируем нужную модель прямо здесь ---
+        # Это позволяет нам использовать быструю модель для этой задачи, не меняя основную модель Стратега.
+        filter_llm = ChatGoogleGenerativeAI(
+            model="models/gemini-2.5-flash",
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
+            temperature=0.0 # Нулевая температура для задач классификации
+        )
+        # ---------------------------------------------------------
+
         claims_for_analysis = []
         for claim_id, claim in knowledge_base.items():
             if claim.get('status') != 'CONFLICTED':
@@ -334,7 +343,18 @@ class ChiefStrategist:
 **ИНСТРУКЦИЯ:** Верни JSON-объект, содержащий поле `relevant_claim_ids`. Это должен быть список, содержащий ТОЛЬКО ID тех утверждений, которые напрямую помогают ответить **хотя бы на один** из четырех бизнес-вопросов.
 """
         
-        report = self._invoke_llm_for_json(prompt, BatchRelevanceReport)
+        # --- ИЗМЕНЕНИЕ: Используем новый PydanticOutputParser с filter_llm ---
+        parser = PydanticOutputParser(pydantic_object=BatchRelevanceReport)
+        prompt_with_instructions = f"{prompt}\n\n{parser.get_format_instructions()}"
+        
+        try:
+            response = filter_llm.invoke(prompt_with_instructions)
+            parsed_object = parser.parse(response.content)
+            report = parsed_object.model_dump()
+        except Exception as e:
+            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА при пакетной фильтрации: {e}")
+            report = {}
+        # --------------------------------------------------------------------
         
         relevant_ids = set(report.get('relevant_claim_ids', []))
         relevant_kb = {claim_id: claim for claim_id, claim in knowledge_base.items() if claim_id in relevant_ids}
