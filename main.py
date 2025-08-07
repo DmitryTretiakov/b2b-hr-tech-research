@@ -162,11 +162,38 @@ def main():
         
         if not active_tasks:
             print("\n--- Все задачи текущей фазы выполнены. Запускаю рефлексию Стратега... ---")
-            updated_plan = strategist.reflect_and_update_plan(world_model)
-            world_model.update_strategic_plan(updated_plan)
+            
+            reflection_success = False
+            MAX_REFLECTION_RETRIES = 2 # Попробуем 2 раза, чтобы не зациклиться надолго
+            for attempt in range(MAX_REFLECTION_RETRIES):
+                print(f"   -> Попытка рефлексии {attempt + 1}/{MAX_REFLECTION_RETRIES}...")
+                # Получаем текущий план ДО попытки обновления
+                original_plan_json = json.dumps(world_model.get_full_context()['dynamic_knowledge']['strategic_plan'])
+
+                updated_plan = strategist.reflect_and_update_plan(world_model)
+                
+                # Проверяем, действительно ли план изменился. Если нет, значит была ошибка.
+                if updated_plan and json.dumps(updated_plan) != original_plan_json:
+                    world_model.update_strategic_plan(updated_plan)
+                    print("   -> Рефлексия успешна, план обновлен.")
+                    reflection_success = True
+                    break # Выходим из цикла попыток
+                else:
+                    print(f"   !!! Попытка рефлексии {attempt + 1} провалена (план не изменился). Пауза 15 секунд перед повтором.")
+                    time.sleep(15)
+
+            if not reflection_success:
+                print("!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось провести рефлексию после нескольких попыток. Завершение работы.")
+                # Здесь можно либо завершить работу, либо пометить проект как FAILED
+                world_model.dynamic_knowledge['strategic_plan']['main_goal_status'] = 'FAILED'
+                world_model._save_state_to_disk() # Сохраняем статус FAILED
+                break # Выходим из главного цикла while True
+
             print(f"   [Оркестратор] Пауза после рефлексии на {STRATEGIST_COOLDOWN_SECONDS} секунд...")
             time.sleep(STRATEGIST_COOLDOWN_SECONDS)
-            if updated_plan.get("main_goal_status") == "READY_FOR_FINAL_BRIEF":
+            
+            # Этот код остается таким же, но теперь он будет вызван только после УСПЕШНОЙ рефлексии
+            if world_model.get_full_context()['dynamic_knowledge']['strategic_plan'].get("main_goal_status") == "READY_FOR_FINAL_BRIEF":
                 print("--- Стратег решил, что информации достаточно. Переходим к написанию финального отчета. ---")
                 break
             
@@ -227,8 +254,9 @@ def main():
         
         # Валидируем черновик
         validation_report = strategist.validate_artifact(
-            draft_summary, 
-            required_sections=["Executive Summary", "Концепция Продукта", "Дорожная Карта"]
+        llms['expert_flash'], # <--- ДОБАВЛЕНО
+        draft_summary, 
+        required_sections=["Executive Summary", "Концепция Продукта", "Дорожная Карта"]
         )
         
         if validation_report.get("is_valid"):
@@ -259,8 +287,9 @@ def main():
         feedback = brief_content
         draft_brief = strategist.write_extended_brief(world_model, feedback=feedback)
         validation_report = strategist.validate_artifact(
-            draft_brief,
-            required_sections=["Анализ Активов ТГУ", "Конкурентный Ландшафт", "Бизнес-Кейс"]
+        llms['expert_flash'], # <--- ДОБАВЛЕНО
+        draft_brief,
+        required_sections=["Анализ Активов ТГУ", "Конкурентный Ландшафт", "Бизнес-Кейс"]
         )
         if validation_report.get("is_valid"):
             brief_content = draft_brief

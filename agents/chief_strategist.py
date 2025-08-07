@@ -350,13 +350,12 @@ class ChiefStrategist:
 Твой подробный аналитический обзор:"""
         return self._invoke_llm_for_text(prompt)
     
-    def validate_artifact(self, artifact_text: str, required_sections: List[str]) -> dict:
+    def validate_artifact(self, validator_llm: ChatGoogleGenerativeAI, artifact_text: str, required_sections: List[str]) -> dict:
         """
         Проверяет сгенерированный артефакт на соответствие базовым критериям качества.
         Использует быструю и дешевую модель.
         """
         print("      [Валидатор] -> Проверяю артефакт на соответствие критериям качества...")
-        validator_llm = self.llms["expert_flash"]
 
         required_sections_str = ", ".join(required_sections)
 
