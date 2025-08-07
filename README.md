@@ -20,34 +20,34 @@
 
 ```mermaid
 graph TD
-    subgraph "Оркестратор (main.py)"
-        A[Цикл Управления]
+    subgraph "Orchestrator (main.py)"
+        A["Control Loop"]
     end
 
-    subgraph "Агенты"
-        B[Chief Strategist]
-        C[Expert Team]
+    subgraph "Agents"
+        B["Chief Strategist"]
+        C["Expert Team"]
     end
 
-    subgraph "Центральное Хранилище"
-        D[World Model]
+    subgraph "Central Storage"
+        D["World Model"]
     end
 
-    subgraph "Инструменты и Данные"
-        E[Search Agent]
-        F[Semantic Index (FAISS)]
-        G[База Знаний  (Knowledge Base)]
-        H[Состояние (system_state.json)]
+    subgraph "Tools and Data"
+        E["Search Agent"]
+        F["Semantic Index (FAISS)"]
+        G["Knowledge Base"]
+        H["State (system_state.json)"]
     end
 
-    A -->|Создать/Обновить План| B
-    A -->|Выполнить Задачу| C
-    B <-->|Читает/Пишет| D
-    C <-->|Читает/Пишет| D
-    C -->|Использует| E
-    D -->|Содержит| F
-    D -->|Содержит| G
-    D -->|Сохраняется в| H
+    A -->|"Create/Update Plan"| B
+    A -->|"Perform Task"| C
+    B <-->|"Reads/Writes"| D
+    C <-->|"Reads/Writes"| D
+    C -->|"Uses"| E
+    D -->|"Contains"| F
+    D -->|"Contains"| G
+    D -->|"Saved in"| H
 
 ```
 
