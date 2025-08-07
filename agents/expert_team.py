@@ -129,16 +129,15 @@ class ExpertTeam:
         
         # --- 1. Извлечение данных о конфликте ---
         try:
-            # "Разрешить противоречие между утверждениями claim_A и claim_B"
-            parts = task['description'].split(' ')
-            claim_id_A = parts[-3]
-            claim_id_B = parts[-1]
+            claim_ids = task['conflict_details']['claim_ids']
+            claim_id_A = claim_ids[0]
+            claim_id_B = claim_ids[1]
             
             kb = world_model.get_full_context()['dynamic_knowledge']['knowledge_base']
             claim_A = kb[claim_id_A]
             claim_B = kb[claim_id_B]
-        except (IndexError, KeyError) as e:
-            print(f"   [Арбитр] !!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось распарсить ID конфликтующих утверждений из задачи. Ошибка: {e}")
+        except (KeyError, IndexError) as e:
+            print(f"   [Арбитр] !!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось извлечь ID из поля 'conflict_details'. Ошибка: {e}")
             world_model.update_task_status(task['task_id'], 'FAILED')
             return
 
@@ -214,20 +213,6 @@ class ExpertTeam:
         print("   [Арбитр] <- Конфликт успешно разрешен.")
         world_model.update_task_status(task['task_id'], 'COMPLETED')
 
-    def _are_claims_related(self, claim_A_text: str, claim_B_text: str) -> bool:
-        """Использует быструю LLM для определения, говорят ли два утверждения об одном и том же."""
-        print(f"      [Детектор Связи] -> Проверяю связь между утверждениями...")
-        llm = self.llms["expert_lite"]
-        prompt = f"""Утверждение А: "{claim_A_text}"
-Утверждение Б: "{claim_B_text}"
-
-Эти два утверждения касаются одного и того же ключевого объекта, концепции или показателя?
-Ответь ТОЛЬКО "Да" или "Нет"."""
-        try:
-            response = llm.invoke(prompt)
-            return "да" in response.content.lower()
-        except Exception:
-            return False # В случае ошибки считаем, что не связаны
     def _batch_audit_sources(self, urls: List[str]) -> Dict[str, dict]:
         """
         Классифицирует пакет URL одним вызовом LLM и возвращает словарь с типами и коэффициентами доверия.
@@ -424,7 +409,10 @@ class ExpertTeam:
                             "assignee": "ProductOwnerAgent",
                             "description": f"Разрешить противоречие между утверждениями {new_claim['claim_id']} и {existing_claim_id}. Найди третий, решающий источник.",
                             "goal": "Обеспечить целостность Базы Знаний.",
-                            "status": "PENDING", "retry_count": 0
+                            "status": "PENDING", "retry_count": 0,
+                            "conflict_details": {
+                            "claim_ids": [new_claim['claim_id'], existing_claim_id]
+                            }
                         }
                         world_model.add_task_to_plan(conflict_task)
                         break
@@ -568,12 +556,23 @@ class ExpertTeam:
 4.  **Сделай вывод** о потенциальной рентабельности.
 5.  **Сформируй результат** в виде ОДНОГО JSON-объекта с заголовком и полной Markdown-строкой, содержащей таблицы и выводы.
 """
-        report = self._invoke_llm_for_json(arbiter_llm, prompt, FinancialReport)
-        if report and report.get('markdown_content'):
+        report = None
+        for i in range(3): # 3 попытки
+            print(f"      [FinancialModelAgent] Попытка {i+1}/3 генерации отчета...")
+            # --- ИЗМЕНЕНИЕ: Вызов LLM теперь в цикле ---
+            attempted_report = self._invoke_llm_for_json(arbiter_llm, prompt, FinancialReport)
+            if attempted_report and attempted_report.get('markdown_content'):
+                report = attempted_report
+                break # Успех, выходим из цикла
+            time.sleep(5) # Пауза перед повторной попыткой
+        
+        # --- Проверка результата ПОСЛЕ цикла ---
+        if report:
             filename = "financial_model_mvp.md"
             world_model.save_artifact(filename, f"# {report['report_title']}\n\n{report['markdown_content']}")
             world_model.update_task_status(task['task_id'], 'COMPLETED')
         else:
+            print(f"   [FinancialModelAgent] !!! Не удалось сгенерировать отчет после 3 попыток.")
             world_model.update_task_status(task['task_id'], 'FAILED')
 
     def _execute_product_task(self, task: dict, world_model: WorldModel):
@@ -599,12 +598,22 @@ class ExpertTeam:
 2.  **Сформулируй список User Stories** для MVP в формате "Как <роль>, я хочу <действие>, чтобы <ценность>".
 3.  **Верни результат** в виде ОДНОГО JSON-объекта.
 """
-        report = self._invoke_llm_for_json(arbiter_llm, prompt, ProductBrief)
-        if report and report.get('product_description'):
+        report = None
+        for i in range(3): # 3 попытки
+            print(f"      [ProductManagerAgent] Попытка {i+1}/3 генерации отчета...")
+            attempted_report = self._invoke_llm_for_json(arbiter_llm, prompt, ProductBrief)
+            if attempted_report and attempted_report.get('product_description'):
+                report = attempted_report
+                break # Успех, выходим из цикла
+            time.sleep(5) # Пауза перед повторной попыткой
+
+        # --- Проверка результата ПОСЛЕ цикла ---
+        if report:
             filename = "product_brief_mvp.md"
             content = f"# Описание Продукта: Карьерный Навигатор\n\n{report['product_description']}\n\n## User Stories для MVP\n\n"
             content += "\n".join([f"- {story}" for story in report['user_stories']])
             world_model.save_artifact(filename, content)
             world_model.update_task_status(task['task_id'], 'COMPLETED')
         else:
+            print(f"   [ProductManagerAgent] !!! Не удалось сгенерировать отчет после 3 попыток.")
             world_model.update_task_status(task['task_id'], 'FAILED')
