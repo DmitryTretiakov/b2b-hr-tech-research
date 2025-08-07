@@ -17,6 +17,9 @@ class Task(BaseModel):
     goal: str = Field(description="Бизнес-цель, на которую направлена эта задача. Что мы хотим узнать?")
     status: Literal['PENDING', 'IN_PROGRESS', 'COMPLETED', 'FAILED'] = Field(description="Текущий статус задачи. Новые задачи всегда PENDING.")
     retry_count: int = Field(default=0, description="Счетчик повторных попыток выполнения задачи в случае сбоя API.")
+    
+class BatchRelevanceReport(BaseModel):
+    relevant_claim_ids: List[str] = Field(description="Список ID всех утверждений, которые были сочтены коммерчески релевантными.")
 
 class Phase(BaseModel):
     """Описывает одну фазу проекта, состоящую из нескольких задач."""

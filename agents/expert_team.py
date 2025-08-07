@@ -194,44 +194,42 @@ URL: "{url}"
             final_claims = final_claims_dict.get('claims', [])
             if not final_claims: return []
 
-             # --- ШАГ 6: ПОШТУЧНАЯ ВЕРИФИКАЦИЯ (теперь код будет работать) ---
+            # --- ИСПРАВЛЕННЫЙ ШАГ 6: ПОШТУЧНАЯ ВЕРИФИКАЦИЯ И ИНТЕГРАЦИЯ ---
             print(f"   [Эксперт {assignee}] Шаг 6/6: Провожу финальную верификацию и интеграцию {len(final_claims)} утверждений...")
             verified_claims_for_log = []
             knowledge_base = world_model_context['dynamic_knowledge']['knowledge_base']
 
             for new_claim in final_claims:
                 is_conflicted = False
+                # Проверяем новый claim на конфликт со всей текущей базой знаний
                 for existing_claim_id, existing_claim in knowledge_base.items():
                     if new_claim['claim_id'] == existing_claim_id: continue
 
                     if self._are_claims_related(existing_claim['statement'], new_claim['statement']):
                         relationship = self._perform_nli_audit(existing_claim, new_claim)
                         if relationship == "CONTRADICTS":
-                            print(f"!!! [Детектор Противоречий] ОБНАРУЖЕН КОНФЛИКТ...")
+                            print(f"!!! [Детектор Противоречий] ОБНАРУЖЕН КОНФЛИКТ между новым claim '{new_claim['claim_id']}' и существующим '{existing_claim_id}'")
                             is_conflicted = True
                             
                             existing_claim['status'] = 'CONFLICTED'
-                            # --- ИСПОЛЬЗУЕМ ПЕРЕДАННЫЙ ОБЪЕКТ ---
                             world_model.add_claims_to_kb(existing_claim)
                             
                             conflict_task = {
                                 "task_id": f"conflict_{str(uuid.uuid4())[:8]}",
                                 "assignee": "ProductOwnerAgent",
-                                "description": f"Разрешить противоречие между утверждениями {new_claim['claim_id']} и {existing_claim_id}...",
+                                "description": f"Разрешить противоречие между утверждениями {new_claim['claim_id']} и {existing_claim_id}. Найди третий, решающий источник.",
                                 "goal": "Обеспечить целостность Базы Знаний.",
                                 "status": "PENDING", "retry_count": 0
                             }
-                            # --- ИСПОЛЬЗУЕМ ПЕРЕДАННЫЙ ОБЪЕКТ ---
                             world_model.add_task_to_plan(conflict_task)
-                            break 
+                            break # Нашли конфликт, прекращаем проверку для этого new_claim
 
+                # Решение о судьбе нового claim принимается здесь, ПОСЛЕ проверки всей базы
                 if is_conflicted:
                     new_claim['status'] = 'CONFLICTED'
-                    # --- ИСПОЛЬЗУЕМ ПЕРЕДАННЫЙ ОБЪЕКТ ---
                     world_model.add_claims_to_kb(new_claim)
                 else:
                     new_claim['status'] = 'VERIFIED'
-                    # --- ИСПОЛЬЗУЕМ ПЕРЕДАННЫЙ ОБЪЕКТ ---
                     world_model.add_claims_to_kb(new_claim)
                     verified_claims_for_log.append(new_claim)
 
