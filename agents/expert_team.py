@@ -168,37 +168,6 @@ class ExpertTeam:
         print(f"      [NLI Аудитор] <- Результат: {relationship}")
         return relationship
     
-    def _audit_source(self, url: str) -> dict:
-        """
-        Классифицирует URL с помощью gemma-3-27b-it и возвращает тип и коэффициент доверия.
-        """
-        print(f"      [Аудитор Источников] -> Классифицирую URL: {url}")
-        auditor_llm = self.llms["source_auditor"]
-        
-        source_types = list(SOURCE_TRUST_MULTIPLIERS.keys())
-        
-        prompt = f"""Твоя задача - классифицировать тип источника по его URL.
-URL: "{url}"
-
-Выбери ОДИН наиболее подходящий тип из этого списка: {source_types}
-
-Верни в ответе ТОЛЬКО и ИСКЛЮЧИТЕЛЬНО название типа. Например: OFFICIAL_DOCS
-"""
-        try:
-            response = auditor_llm.invoke(prompt)
-            # Убираем лишние пробелы и возможные markdown-конструкции
-            source_type = response.content.strip().replace("`", "")
-            
-            if source_type not in source_types:
-                print(f"      [Аудитор Источников] !!! Внимание: Модель вернула невалидный тип '{source_type}'. Используется UNKNOWN.")
-                source_type = "UNKNOWN"
-
-            trust_multiplier = SOURCE_TRUST_MULTIPLIERS.get(source_type, 0.2)
-            print(f"      [Аудитор Источников] <- URL классифицирован как {source_type} с доверием {trust_multiplier}.")
-            return {"type": source_type, "trust": trust_multiplier}
-        except Exception as e:
-            print(f"      [Аудитор Источников] !!! КРИТИЧЕСКАЯ ОШИБКА при классификации URL: {e}")
-            return {"type": "UNKNOWN", "trust": 0.2}
         
     def execute_task(self, task: dict, world_model: WorldModel) -> list:
         assignee = task['assignee']
