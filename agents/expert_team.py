@@ -25,7 +25,7 @@ class Claim(BaseModel):
     source_link: str = Field(description="Прямая ссылка на самый релевантный источник, откуда взята информация.")
     source_quote: str = Field(description="Прямая цитата из источника, которая доказывает утверждение.")
     confidence_score: float = Field(description="Оценка уверенности в достоверности источника от 0.0 до 1.0.")
-    status: Literal["UNVERIFIED", "VERIFIED", "CONFLICTED"] = Field(description="Статус утверждения. На этапе создания всегда 'UNVERIFIED'.")
+    status: Literal["UNVERIFIED", "VERIFIED", "CONFLICTED", "DEPRECATED"] = Field(description="Статус утверждения. На этапе создания всегда 'UNVERIFIED'.")
     source_type: str = Field(default="UNKNOWN", description="Тип источника (например, OFFICIAL_DOCS, FORUM_POST).")
     source_trust: float = Field(default=0.2, description="Коэффициент доверия к самому ИСТОЧНИКУ, от 0.0 до 1.0.")
 
@@ -71,7 +71,7 @@ class ArbitrationReport(BaseModel):
     winning_claim_id: str = Field(description="ID утверждения, которое было признано верным.")
     losing_claim_id: str = Field(description="ID утверждения, которое было признано ложным/устаревшим.")
     decisive_source_link: str = Field(description="Прямая ссылка на новый, решающий источник, который помог разрешить конфликт.")
-    
+
 SOURCE_TRUST_MULTIPLIERS = {
     "OFFICIAL_DOCS": 1.0,      # Официальная документация продукта или технологии
     "MAJOR_TECH_MEDIA": 0.9,   # Статья на крупном IT-ресурсе (Habr, CNews, TechCrunch)
@@ -110,7 +110,99 @@ class ExpertTeam:
         except Exception as e:
             print(f"!!! КРИТИЧЕСКАЯ ОШИБКА LLM/Парсера в ExpertTeam: {e}")
             return {}
+    def _execute_arbitration_task(self, task: dict, world_model: WorldModel) -> None:
+        """
+        Выполняет задачу по разрешению конфликта между двумя утверждениями.
+        """
+        print(f"   [Арбитр] -> Приступаю к разрешению конфликта: {task['description']}")
         
+        # --- 1. Извлечение данных о конфликте ---
+        try:
+            # "Разрешить противоречие между утверждениями claim_A и claim_B"
+            parts = task['description'].split(' ')
+            claim_id_A = parts[-3]
+            claim_id_B = parts[-1]
+            
+            kb = world_model.get_full_context()['dynamic_knowledge']['knowledge_base']
+            claim_A = kb[claim_id_A]
+            claim_B = kb[claim_id_B]
+        except (IndexError, KeyError) as e:
+            print(f"   [Арбитр] !!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось распарсить ID конфликтующих утверждений из задачи. Ошибка: {e}")
+            world_model.update_task_status(task['task_id'], 'FAILED')
+            return
+
+        # --- 2. Инициализация Gemma для этой задачи ---
+        arbiter_llm = ChatGoogleGenerativeAI(
+            model="models/gemma-3-27b-it",
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
+            temperature=0.1
+        )
+
+        # --- 3. Шаг 1 ReAct: Генерация поискового запроса ---
+        prompt_step1 = f"""**ТВОЯ РОЛЬ:** AI-Арбитр, решающий конфликты.
+**КОНФЛИКТ:** Тебе даны два противоречащих друг другу утверждения.
+- Утверждение А (ID: {claim_A['claim_id']}): "{claim_A['statement']}" (Источник: {claim_A['source_link']})
+- Утверждение Б (ID: {claim_B['claim_id']}): "{claim_B['statement']}" (Источник: {claim_B['source_link']})
+
+**ТВОЯ ЗАДАЧА (Шаг 1):**
+Сформулируй ОДИН, максимально точный и конкретный поисковый запрос на русском языке, который поможет найти авторитетный источник (например, официальный сайт, крупное СМИ, документацию) и однозначно определить, какое из утверждений верно.
+
+Верни результат в виде JSON.
+"""
+        query_report = self._invoke_llm_for_json(arbiter_llm, prompt_step1, ArbitrationSearchQuery)
+        if not query_report or 'query' not in query_report:
+            print("   [Арбитр] !!! Не удалось сгенерировать поисковый запрос. Задача провалена.")
+            world_model.update_task_status(task['task_id'], 'FAILED')
+            return
+        
+        search_query = query_report['query']
+        print(f"   [Арбитр] Сгенерирован решающий запрос: '{search_query}'")
+
+        # --- 4. Шаг 2 ReAct: Выполнение поиска и вынесение вердикта ---
+        search_results = self.search_agent.search(search_query)
+        formatted_results = format_search_results_for_llm(search_results)
+
+        prompt_step2 = f"""**ТВОЯ РОЛЬ:** AI-Арбитр, решающий конфликты.
+**КОНФЛИКТ:**
+- Утверждение А (ID: {claim_A['claim_id']}): "{claim_A['statement']}"
+- Утверждение Б (ID: {claim_B['claim_id']}): "{claim_B['statement']}"
+
+**НОВЫЕ ДОКАЗАТЕЛЬСТВА:** Я выполнил для тебя поиск по запросу "{search_query}" и получил следующие результаты:
+---
+{formatted_results}
+---
+
+**ТВОЯ ЗАДАЧА (Шаг 2):**
+1.  **Проанализируй** новые доказательства.
+2.  **Прими финальное решение:** Какое из первоначальных утверждений (А или Б) подтверждается новыми доказательствами?
+3.  **Заполни отчет** в формате JSON, указав ID победившего и проигравшего утверждения, ссылку на самый убедительный новый источник и краткое обоснование своего решения.
+"""
+        final_report = self._invoke_llm_for_json(arbiter_llm, prompt_step2, ArbitrationReport)
+
+        # --- 5. Обновление Базы Знаний на основе вердикта ---
+        if not final_report or 'winning_claim_id' not in final_report:
+            print("   [Арбитр] !!! Не удалось вынести финальное решение. Задача провалена.")
+            world_model.update_task_status(task['task_id'], 'FAILED')
+            return
+
+        winner_id = final_report['winning_claim_id']
+        loser_id = final_report['losing_claim_id']
+        
+        # Обновляем статус победителя
+        if winner_id in kb:
+            kb[winner_id]['status'] = 'VERIFIED'
+            world_model.add_claims_to_kb([kb[winner_id]]) # add_claims_to_kb ожидает список
+            print(f"   [Арбитр] Утверждение {winner_id} подтверждено.")
+
+        # Обновляем статус проигравшего
+        if loser_id in kb:
+            kb[loser_id]['status'] = 'DEPRECATED' # Новый статус для проигравших в споре
+            world_model.add_claims_to_kb([kb[loser_id]])
+            print(f"   [Арбитр] Утверждение {loser_id} признано устаревшим.")
+
+        print("   [Арбитр] <- Конфликт успешно разрешен.")
+        world_model.update_task_status(task['task_id'], 'COMPLETED')
+
     def _are_claims_related(self, claim_A_text: str, claim_B_text: str) -> bool:
         """Использует быструю LLM для определения, говорят ли два утверждения об одном и том же."""
         print(f"      [Детектор Связи] -> Проверяю связь между утверждениями...")
@@ -215,6 +307,11 @@ class ExpertTeam:
     
         
     def execute_task(self, task: dict, world_model: WorldModel) -> list:
+        if task.get('assignee') == 'ProductOwnerAgent':
+            self._execute_arbitration_task(task, world_model)
+            # Задачи арбитра не генерируют новых утверждений, они меняют старые.
+            # Поэтому мы возвращаем пустой список.
+            return []
         assignee = task['assignee']
         description = task['description']
         goal = task['goal']

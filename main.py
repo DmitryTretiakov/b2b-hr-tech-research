@@ -223,7 +223,7 @@ def main():
         feedback = summary_content # Используем предыдущий неудачный результат как фидбэк
         
         # Генерируем черновик
-        draft_summary = strategist.write_executive_summary(world_model.get_full_context(), feedback=feedback)
+        draft_summary = strategist.write_executive_summary(world_model, feedback=feedback)
         
         # Валидируем черновик
         validation_report = strategist.validate_artifact(
@@ -257,7 +257,7 @@ def main():
     for i in range(MAX_VALIDATION_RETRIES):
         print(f"\n   -> Попытка {i+1}/{MAX_VALIDATION_RETRIES} генерации Extended Brief...")
         feedback = brief_content
-        draft_brief = strategist.write_extended_brief(world_model.get_full_context(), feedback=feedback)
+        draft_brief = strategist.write_extended_brief(world_model, feedback=feedback)
         validation_report = strategist.validate_artifact(
             draft_brief,
             required_sections=["Анализ Активов ТГУ", "Конкурентный Ландшафт", "Бизнес-Кейс"]
