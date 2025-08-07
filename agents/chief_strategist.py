@@ -32,6 +32,12 @@ class Phase(BaseModel):
     status: Literal['PENDING', 'IN_PROGRESS', 'COMPLETED'] = Field(description="Текущий статус фазы.")
     tasks: List[Task] = Field(description="Список задач для этой фазы.")
 
+class RagQuerySet(BaseModel):
+    """Набор специализированных запросов для RAG, по одному на каждый домен."""
+    market_and_finance_query: str = Field(description="Сжатый поисковый запрос о рынке, финансах, ROI, бизнес-модели.")
+    tech_and_assets_query: str = Field(description="Сжатый поисковый запрос о технологиях, стеке, сильных и слабых сторонах активов ТГУ.")
+    competitor_query: str = Field(description="Сжатый поисковый запрос о конкурентах, их продуктах и позиционировании.")
+    
 class StrategicPlan(BaseModel):
     """Описывает полный стратегический план проекта."""
     main_goal_status: Literal['IN_PROGRESS', 'READY_FOR_FINAL_BRIEF', 'FAILED'] = Field(description="Общий статус всего проекта. IN_PROGRESS, пока идет работа.")
@@ -120,28 +126,88 @@ class ChiefStrategist:
             print("!!! Стратег: Не удалось сгенерировать первоначальный план. Используется план по умолчанию.")
             return {"main_goal_status": "FAILED", "phases": []}
 
-    def reflect_and_update_plan(self, world_model_context: dict) -> dict:
+    def reflect_and_update_plan(self, world_model: 'WorldModel') -> dict:
         """
-        Двухшаговый процесс рефлексии с надежным обновлением плана.
+        Проводит рефлексию с использованием взвешенного Multi-Query RAG для получения сбалансированного контекста.
         """
-        print("   [Стратег] Шаг X: Провожу интеллектуальную рефлексию...")
+        print("   [Стратег] Шаг X: Провожу интеллектуальную рефлексию (Взвешенный Multi-Query RAG)...")
         
-        # Шаг А: Осмысление ситуации (генерация текста)
-        situation_summary = self._summarize_situation(world_model_context)
+        full_context = world_model.get_full_context()
+
+        # Шаг А: Осмысление ситуации (без изменений)
+        situation_summary = self._summarize_situation(full_context)
         if not situation_summary:
             print("!!! Стратег: Не удалось осмыслить ситуацию. План не будет обновлен.")
-            return world_model_context['dynamic_knowledge']['strategic_plan']
+            return full_context['dynamic_knowledge']['strategic_plan']
 
-        # Шаг Б: Превращение осмысления в конкретный план (генерация JSON)
-        updated_plan = self._generate_updated_plan(situation_summary, world_model_context)
+        # Шаг Б: Декомпозиция мысли на запросы (без изменений)
+        rag_queries = self._generate_rag_queries(situation_summary)
+        if not rag_queries:
+            print("!!! Стратег: Не удалось сгенерировать RAG-запросы. Обновление плана отменено.")
+            return full_context['dynamic_knowledge']['strategic_plan']
+
+        # --- ШАГ В: ВЗВЕШЕННЫЙ ПАРАЛЛЕЛЬНЫЙ ПОИСК И СБОРКА ---
+        print("      [Стратег.RAG] -> Выполняю взвешенный поиск по нескольким векторам...")
+        
+        # --- ИЗМЕНЕНИЕ: Определяем разный 'k' для каждого типа запроса ---
+        k_values = {
+            "market_and_finance_query": 20,
+            "tech_and_assets_query": 15,
+            "competitor_query": 10
+        }
+        # -----------------------------------------------------------------
+
+        all_relevant_ids = set()
+        
+        for query_name, query_text in rag_queries.items():
+            if query_text:
+                # Используем соответствующий 'k' или значение по умолчанию
+                k = k_values.get(query_name, 10) 
+                ids = world_model.semantic_index.find_similar_claim_ids(query_text, top_k=k)
+                print(f"         - Запрос '{query_name}' (k={k}): найдено {len(ids)} ID.")
+                all_relevant_ids.update(ids)
+
+        # Шаг Г: Полное обогащение контекста (без изменений)
+        print(f"      [СтратеГ.RAG] -> Всего найдено {len(all_relevant_ids)} уникальных релевантных утверждений.")
+        relevant_knowledge_base = {
+            claim_id: full_context['dynamic_knowledge']['knowledge_base'][claim_id]
+            for claim_id in all_relevant_ids
+            if claim_id in full_context['dynamic_knowledge']['knowledge_base']
+        }
+        
+        # Шаг Д: Генерация обновленного плана (без изменений)
+        updated_plan = self._generate_updated_plan(situation_summary, full_context, relevant_knowledge_base)
 
         if updated_plan and "phases" in updated_plan:
             print("   [Стратег] Рефлексия завершена. План обновлен.")
             return updated_plan
         else:
             print("!!! Стратег: Не удалось сгенерировать обновленный план. План не будет обновлен.")
-            return world_model_context['dynamic_knowledge']['strategic_plan']
+            return full_context['dynamic_knowledge']['strategic_plan']
+    def _generate_rag_queries(self, situation_summary: str) -> dict:
+        """
+        Декомпозирует общую мысль на несколько сфокусированных запросов для Multi-Query RAG.
+        """
+        print("      [Стратег.RAG] -> Декомпозирую общую мысль на сфокусированные запросы...")
+        # Используем быструю модель для этой задачи
+        query_gen_llm = self.llms["expert_flash"]
 
+        prompt = f"""**ТВОЯ ЗАДАЧА:** Ты — системный аналитик. Твоя цель — преобразовать общую аналитическую сводку в несколько конкретных, сжатых поисковых запросов для векторной базы данных.
+
+**АНАЛИТИЧЕСКАЯ СВОДКА ОТ СТРАТЕГА:**
+---
+{situation_summary}
+---
+
+**ИНСТРУКЦИЯ:**
+На основе этой сводки, сформулируй три очень коротких и сфокусированных запроса, по одному на каждый домен. Запросы должны отражать суть сводки в контексте каждого домена.
+
+Верни результат в виде ОДНОГО JSON-объекта.
+"""
+        
+        report = self._invoke_llm_for_json(prompt, RagQuerySet)
+        return report
+    
     def _summarize_situation(self, world_model_context: dict) -> str:
         """Шаг А рефлексии: Анализ и выводы в свободной форме."""
         print("      [Стратег.Рефлексия] Шаг А: Анализирую текущую ситуацию...")
