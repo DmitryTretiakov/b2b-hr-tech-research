@@ -35,9 +35,9 @@ graph TD
 
     subgraph "Инструменты и Данные"
         E[Search Agent]
-        F[Semantic Index <br/> (FAISS)]
-        G[База Знаний <br/> (Knowledge Base)]
-        H[Состояние <br/> (system_state.json)]
+        F[Semantic Index (FAISS)]
+        G[База Знаний  (Knowledge Base)]
+        H[Состояние (system_state.json)]
     end
 
     A -->|Создать/Обновить План| B
