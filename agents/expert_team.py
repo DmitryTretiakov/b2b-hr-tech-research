@@ -61,6 +61,17 @@ class BatchAuditReport(BaseModel):
     """Отчет аудитора по пакету источников."""
     audit_results: Dict[str, SourceAuditResult] = Field(description="Словарь, где ключ - это URL источника, а значение - результат его аудита.")
 
+class ArbitrationSearchQuery(BaseModel):
+    """Описывает поисковый запрос, который должен разрешить конфликт."""
+    query: str = Field(description="Единственный, очень конкретный поисковый запрос на русском языке для нахождения решающего источника.")
+
+class ArbitrationReport(BaseModel):
+    """Описывает финальное решение Арбитра по конфликту."""
+    reasoning: str = Field(description="Краткое и четкое объяснение, почему было принято такое решение, на основе нового источника.")
+    winning_claim_id: str = Field(description="ID утверждения, которое было признано верным.")
+    losing_claim_id: str = Field(description="ID утверждения, которое было признано ложным/устаревшим.")
+    decisive_source_link: str = Field(description="Прямая ссылка на новый, решающий источник, который помог разрешить конфликт.")
+    
 SOURCE_TRUST_MULTIPLIERS = {
     "OFFICIAL_DOCS": 1.0,      # Официальная документация продукта или технологии
     "MAJOR_TECH_MEDIA": 0.9,   # Статья на крупном IT-ресурсе (Habr, CNews, TechCrunch)
