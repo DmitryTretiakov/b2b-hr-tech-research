@@ -29,6 +29,10 @@ class StrategicPlan(BaseModel):
     main_goal_status: Literal['IN_PROGRESS', 'READY_FOR_FINAL_BRIEF', 'FAILED'] = Field(description="Общий статус всего проекта. IN_PROGRESS, пока идет работа.")
     phases: List[Phase] = Field(description="Список всех фаз проекта.")
 
+# --- НОВАЯ PYDANTIC СХЕМА ДЛЯ ФИЛЬТРА РЕЛЕВАНТНОСТИ ---
+class RelevanceCheck(BaseModel):
+    """Описывает результат проверки утверждения на коммерческую релевантность."""
+    is_relevant: bool = Field(description="True, если утверждение напрямую помогает ответить хотя бы на один из бизнес-вопросов, иначе False.")
 
 class ChiefStrategist:
     """
@@ -60,6 +64,51 @@ class ChiefStrategist:
             print(f"!!! КРИТИЧЕСКАЯ ОШИБКА LLM/Парсера: Не удалось сгенерировать или распарсить JSON. Ошибка: {e}")
             # Возвращаем пустой словарь, чтобы система могла обработать сбой
             return {}
+        
+    # --- НОВЫЙ ПРИВАТНЫЙ МЕТОД ДЛЯ ПРОВЕРКИ РЕЛЕВАНТНОСТИ ---
+    def _is_claim_commercially_relevant(self, claim: dict) -> bool:
+        """
+        Проверяет одно утверждение на соответствие ключевым бизнес-вопросам.
+        """
+        # Используем самую быструю и дешевую модель для бинарной классификации
+        llm = self.llm 
+        
+        claim_text = f"Утверждение: '{claim['statement']}' (Значение: {claim['value']})"
+        
+        prompt = f"""**КОНТЕКСТ:** Мы готовим бизнес-кейс для создания нового B2B HR-Tech продукта.
+**УТВЕРЖДЕНИЕ ДЛЯ АНАЛИЗА:**
+---
+{claim_text}
+---
+**БИЗНЕС-ВОПРОСЫ:**
+1.  Помогает ли это утверждение оценить потенциальный **доход, стоимость или ROI**?
+2.  Описывает ли это утверждение значимый **риск** (технический, юридический, рыночный)?
+3.  Раскрывает ли это утверждение уникальное **конкурентное преимущество** или сильную сторону наших активов?
+4.  Указывает ли это утверждение на явную **потребность или "боль"** потенциальных клиентов?
+
+Ответь на вопрос: Помогает ли данное утверждение напрямую ответить **хотя бы на один** из этих четырех бизнес-вопросов?
+"""
+        # Мы используем _invoke_llm_for_json, чтобы получить гарантированный boolean
+        check_result = self._invoke_llm_for_json(llm, prompt, RelevanceCheck)
+        return check_result.get('is_relevant', False)
+
+    # --- НОВЫЙ ПРИВАТНЫЙ МЕТОД ДЛЯ ФИЛЬТРАЦИИ БАЗЫ ЗНАНИЙ ---
+    def _filter_kb_by_relevance(self, knowledge_base: dict) -> dict:
+        """
+        Фильтрует всю базу знаний, оставляя только коммерчески релевантные утверждения.
+        """
+        print("   [Стратег] -> Фильтрую Базу Знаний по коммерческой релевантности...")
+        relevant_kb = {}
+        for claim_id, claim in knowledge_base.items():
+            # Пропускаем проверку для конфликтных утверждений
+            if claim.get('status') == 'CONFLICTED':
+                continue
+            
+            if self._is_claim_commercially_relevant(claim):
+                relevant_kb[claim_id] = claim
+        
+        print(f"   [Стратег] <- Фильтрация завершена. Осталось {len(relevant_kb)} из {len(knowledge_base)} утверждений.")
+        return relevant_kb
 
     def _invoke_llm_for_text(self, prompt: str) -> str:
         """Простой вызов LLM для генерации текста."""
@@ -170,6 +219,9 @@ class ChiefStrategist:
     def write_executive_summary(self, world_model_context: dict) -> str:
         """Пишет короткую (2-3 страницы) аналитическую записку для коммерческого директора."""
         print("   [Стратег] Финальный Шаг (1/2): Пишу краткую аналитическую записку для руководства...")
+        filtered_context = json.loads(json.dumps(world_model_context)) # Deep copy
+        original_kb = filtered_context['dynamic_knowledge']['knowledge_base']
+        filtered_context['dynamic_knowledge']['knowledge_base'] = self._filter_kb_by_relevance(original_kb)
         prompt = f"""**ТВОЯ РОЛЬ:** Ты - Главный Продуктовый Стратег. Твоя аудитория - коммерческий директор. Его волнуют цифры, риски, ROI и конкурентные преимущества. Избегай академического языка.
 **ТВОЯ ЗАДАЧА:** На основе ВСЕЙ собранной информации, напиши убедительную аналитическую записку. Объем: не более 3 страниц. Стиль: Максимально сжатый, по делу.
 **КОНТЕКСТ И БАЗА ЗНАНИЙ:**\n---\n{json.dumps(world_model_context, ensure_ascii=False, indent=2)}\n---
@@ -187,6 +239,16 @@ class ChiefStrategist:
     def write_extended_brief(self, world_model_context: dict) -> str:
         """Пишет подробный (5-10 страниц) обзор для Владельца Продукта."""
         print("   [Стратег] Финальный Шаг (2/2): Пишу подробный обзор для Владельца Продукта...")
+        context_with_relevance = json.loads(json.dumps(world_model_context))
+        all_claims = context_with_relevance['dynamic_knowledge']['knowledge_base']
+        
+        print("   [Стратег] -> Размечаю Базу Знаний по коммерческой релевантности...")
+        for claim_id, claim in all_claims.items():
+            if claim.get('status') == 'CONFLICTED':
+                claim['is_relevant'] = False
+                continue
+            claim['is_relevant'] = self._is_claim_commercially_relevant(claim)
+        print("   [Стратег] <- Разметка завершена.")
         prompt = f"""**ТВОЯ РОЛЬ:** Ты - Главный Продуктовый Стратег. Твоя аудитория - технически подкованный Владелец Продукта, которому нужна максимальная детализация для дальнейшей работы.
 **ТВОЯ ЗАДАЧА:** На основе ВСЕЙ собранной информации, напиши подробный аналитический обзор. Объем: 5-10 страниц.
 **КОНТЕКСТ И БАЗА ЗНАНИЙ:**\n---\n{json.dumps(world_model_context, ensure_ascii=False, indent=2)}\n---

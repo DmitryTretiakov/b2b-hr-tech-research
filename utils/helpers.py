@@ -13,37 +13,55 @@ class SearchAPIFailureError(Exception):
 
 def robust_hybrid_search(query: str, num_results: int = 10) -> dict:
     """
-    Выполняет поиск, используя Serper как основной API и Google Custom Search как резервный.
-    Оба API имеют механизм повторных попыток.
+    Выполняет поиск, используя Serper (через requests) как основной API и Google как резервный.
     """
-    # --- Попытка №1: Основной API (Serper) ---
-    serpapi_key = os.getenv("SERPAPI_API_KEY")
-    if serpapi_key:
-        print(f"    -> [Поиск Serper] Выполняю запрос: '{query}'...")
+    # --- Попытка №1: Основной API (Serper) с использованием requests ---
+    serper_api_key = os.getenv("SERPER_API_KEY") # Убедитесь, что имя в .env совпадает!
+
+    # --- ИЗМЕНЕНИЕ: ЯВНАЯ ПРОВЕРКА КЛЮЧА С ЛОГИРОВАНИЕМ ---
+    if not serper_api_key:
+        print("   [Поиск Serper] !!! Внимание: Ключ SERPER_API_KEY не найден в .env. Serper будет пропущен.")
+    else:
+        print(f"    -> [Поиск Serper] Выполняю POST-запрос: '{query}'...")
+        url = "https://google.serper.dev/search"
+        payload = json.dumps({"q": query, "num": num_results, "gl": "ru", "hl": "ru"})
+        headers = {
+            'X-API-KEY': serper_api_key,
+            'Content-Type': 'application/json'
+        }
+        
         retries = 3
         delay = 2
         for i in range(retries):
             try:
-                params = {
-                    "q": query, "api_key": serpapi_key, "engine": "google",
-                    "gl": "ru", "hl": "ru",
-                }
-                # ВАЖНО: Устанавливаем таймаут прямо в клиенте
-                client = SerpApiClient(params_dict=params, timeout=30)
-                results = client.get_dict()
+                response = requests.post(url, headers=headers, data=payload, timeout=30)
+                response.raise_for_status() # Проверка на ошибки HTTP (4xx, 5xx)
                 
-                if "organic_results" in results:
+                results = response.json()
+                
+                if "organic" in results:
+                    # Адаптируем ответ Serper под наш стандартный формат
                     formatted_results = {
                         "items": [{"title": item.get("title"), "link": item.get("link"), "snippet": item.get("snippet")}
-                                  for item in results["organic_results"][:num_results]]
+                                  for item in results["organic"][:num_results]]
                     }
                     print(f"    <- [Поиск Serper] Ответ получен и обработан.")
                     return formatted_results
                 else:
-                    # Если нет результатов, но и не ошибка, значит поиск пуст
                     print(f"   [Поиск Serper] Запрос выполнен, но органические результаты не найдены.")
                     break # Прерываем попытки, переходим к резервному API
 
+            except requests.exceptions.HTTPError as e:
+                # Особая обработка ошибки "Too Many Requests"
+                if e.response.status_code == 429:
+                    print(f"   [Поиск Serper] !!! Внимание: Получен статус 429. Попытка {i+1}/{retries}. Жду {delay} сек...")
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                else:
+                    print(f"!!! СЕТЕВАЯ ОШИБКА HTTP (Serper): {e}")
+                    break # Прерываем попытки при других ошибках
+            
             except Exception as e:
                 print(f"   [Поиск Serper] !!! ОШИБКА: {e}. Попытка {i+1}/{retries}. Жду {delay} сек...")
                 time.sleep(delay)
@@ -52,21 +70,17 @@ def robust_hybrid_search(query: str, num_results: int = 10) -> dict:
         print(f"!!! [SearchAgent] Основной API (Serper) не справился после {retries} попыток.")
 
     # --- Попытка №2: Резервный API (Google Custom Search) ---
+    # Этот блок остается без изменений
     google_api_key = os.getenv("GOOGLE_SEARCH_API_KEY")
     google_cx_id = os.getenv("SEARCH_ENGINE_ID")
     if google_api_key and google_cx_id:
         print(f"!!! [SearchAgent] Переключаюсь на резервный API (Google)...")
-        try:
-            # Вызываем legacy-функцию, которая теперь тоже может выбросить исключение
-            return google_search_legacy(query, google_api_key, google_cx_id, num_results)
-        except SearchAPIFailureError:
-            # Если и Google провалился, то это конец
-            pass # Проваливаемся дальше
+        # google_search_legacy выбросит SearchAPIFailureError в случае провала
+        return google_search_legacy(query, google_api_key, google_cx_id, num_results)
 
-    # --- ИЗМЕНЕНИЕ: ВМЕСТО ВОЗВРАТА СЛОВАРЯ, ВЫБРАСЫВАЕМ ИСКЛЮЧЕНИЕ ---
+    # Если мы дошли до сюда, значит, оба API провалились.
     print("!!! КРИТИЧЕСКАЯ ОШИБКА ПОИСКА: Все API недоступны или не справились.")
     raise SearchAPIFailureError(f"Все поисковые API провалились для запроса: '{query}'")
-
 
 def google_search_legacy(query: str, api_key: str, cx_id: str, num_results: int) -> dict:
     """Резервная функция поиска через Google API с механизмом повторных попыток."""

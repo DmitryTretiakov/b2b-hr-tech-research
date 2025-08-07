@@ -1,11 +1,14 @@
 # agents/expert_team.py
 import json
+import uuid
 from pydantic import BaseModel, Field 
 from typing import List, Literal, Dict
 from langchain.output_parsers import PydanticOutputParser
 from langchain_google_genai import ChatGoogleGenerativeAI
 from agents.search_agent import SearchAgent
 from utils.helpers import format_search_results_for_llm
+
+from core.world_model import WorldModel
 
 # --- PYDANTIC СХЕМЫ ДЛЯ ЭКСПЕРТНОЙ КОМАНДЫ ---
 
@@ -21,7 +24,7 @@ class Claim(BaseModel):
     source_link: str = Field(description="Прямая ссылка на самый релевантный источник, откуда взята информация.")
     source_quote: str = Field(description="Прямая цитата из источника, которая доказывает утверждение.")
     confidence_score: float = Field(description="Оценка уверенности в достоверности источника от 0.0 до 1.0.")
-    status: Literal["UNVERIFIED", "VERIFIED"] = Field(description="Статус утверждения. На этапе создания всегда 'UNVERIFIED'.")
+    status: Literal["UNVERIFIED", "VERIFIED", "CONFLICTED"] = Field(description="Статус утверждения. На этапе создания всегда 'UNVERIFIED'.")
     source_type: str = Field(default="UNKNOWN", description="Тип источника (например, OFFICIAL_DOCS, FORUM_POST).")
     source_trust: float = Field(default=0.2, description="Коэффициент доверия к самому ИСТОЧНИКУ, от 0.0 до 1.0.")
 
@@ -32,6 +35,10 @@ class ClaimList(BaseModel):
 class AuditReport(BaseModel):
     """Описывает отчет аудитора с перечнем уязвимостей для каждого утверждения."""
     vulnerabilities: Dict[str, List[str]] = Field(description="Словарь, где ключ - это claim_id, а значение - список найденных уязвимостей (текстовых описаний).")
+
+class NLIReport(BaseModel):
+    """Описывает результат анализа взаимосвязи двух утверждений."""
+    relationship: Literal["CONTRADICTS", "SUPPORTS", "NEUTRAL"] = Field(description="Отношение второго утверждения к первому.")
 
 SOURCE_TRUST_MULTIPLIERS = {
     "OFFICIAL_DOCS": 1.0,      # Официальная документация продукта или технологии
@@ -71,6 +78,42 @@ class ExpertTeam:
         except Exception as e:
             print(f"!!! КРИТИЧЕСКАЯ ОШИБКА LLM/Парсера в ExpertTeam: {e}")
             return {}
+        
+    def _are_claims_related(self, claim_A_text: str, claim_B_text: str) -> bool:
+        """Использует быструю LLM для определения, говорят ли два утверждения об одном и том же."""
+        print(f"      [Детектор Связи] -> Проверяю связь между утверждениями...")
+        llm = self.llms["expert_lite"]
+        prompt = f"""Утверждение А: "{claim_A_text}"
+Утверждение Б: "{claim_B_text}"
+
+Эти два утверждения касаются одного и того же ключевого объекта, концепции или показателя?
+Ответь ТОЛЬКО "Да" или "Нет"."""
+        try:
+            response = llm.invoke(prompt)
+            return "да" in response.content.lower()
+        except Exception:
+            return False # В случае ошибки считаем, что не связаны
+
+    # --- НОВЫЙ МЕТОД ДЛЯ NLI-АУДИТА ---
+    def _perform_nli_audit(self, claim_A: dict, claim_B: dict) -> str:
+        """Проверяет два связанных утверждения на предмет противоречия."""
+        print(f"      [NLI Аудитор] -> Найдена связь. Проверяю на противоречие...")
+        llm = self.llms["expert_flash"] # Используем более мощную модель для NLI
+        
+        prompt = f"""Твоя задача - определить логическое отношение между двумя утверждениями.
+Утверждение А (существующее в базе): "{claim_A['statement']}" (Значение: {claim_A['value']})
+Утверждение Б (новое): "{claim_B['statement']}" (Значение: {claim_B['value']})
+
+Противоречит ли Утверждение Б Утверждению А?
+- CONTRADICTS: Если утверждения не могут быть истинными одновременно.
+- SUPPORTS: Если одно утверждение поддерживает или подтверждает другое.
+- NEUTRAL: Если утверждения о разном или не связаны логически.
+"""
+        report = self._invoke_llm_for_json(llm, prompt, NLIReport)
+        relationship = report.get("relationship", "NEUTRAL")
+        print(f"      [NLI Аудитор] <- Результат: {relationship}")
+        return relationship
+    
     def _audit_source(self, url: str) -> dict:
         """
         Классифицирует URL с помощью gemma-3-27b-it и возвращает тип и коэффициент доверия.
@@ -103,11 +146,12 @@ URL: "{url}"
             print(f"      [Аудитор Источников] !!! КРИТИЧЕСКАЯ ОШИБКА при классификации URL: {e}")
             return {"type": "UNKNOWN", "trust": 0.2}
         
-    def execute_task(self, task: dict, world_model_context: dict) -> list:
+    def execute_task(self, task: dict, world_model: WorldModel) -> list:
         """Основной метод, запускающий полный цикл работы над одной задачей."""
         assignee = task['assignee']
         description = task['description']
         goal = task['goal']
+        world_model_context = world_model.get_full_context()
         print(f"\n--- Эксперт {assignee}: Приступаю к задаче '{description}' ---")
 
         try:
@@ -150,9 +194,49 @@ URL: "{url}"
             final_claims = final_claims_dict.get('claims', [])
             if not final_claims: return []
 
-            print(f"--- Эксперт {assignee}: Задача выполнена, сгенерировано {len(final_claims)} верифицированных утверждений. ---")
-            return final_claims
+             # --- ШАГ 6: ПОШТУЧНАЯ ВЕРИФИКАЦИЯ (теперь код будет работать) ---
+            print(f"   [Эксперт {assignee}] Шаг 6/6: Провожу финальную верификацию и интеграцию {len(final_claims)} утверждений...")
+            verified_claims_for_log = []
+            knowledge_base = world_model_context['dynamic_knowledge']['knowledge_base']
 
+            for new_claim in final_claims:
+                is_conflicted = False
+                for existing_claim_id, existing_claim in knowledge_base.items():
+                    if new_claim['claim_id'] == existing_claim_id: continue
+
+                    if self._are_claims_related(existing_claim['statement'], new_claim['statement']):
+                        relationship = self._perform_nli_audit(existing_claim, new_claim)
+                        if relationship == "CONTRADICTS":
+                            print(f"!!! [Детектор Противоречий] ОБНАРУЖЕН КОНФЛИКТ...")
+                            is_conflicted = True
+                            
+                            existing_claim['status'] = 'CONFLICTED'
+                            # --- ИСПОЛЬЗУЕМ ПЕРЕДАННЫЙ ОБЪЕКТ ---
+                            world_model.add_claims_to_kb(existing_claim)
+                            
+                            conflict_task = {
+                                "task_id": f"conflict_{str(uuid.uuid4())[:8]}",
+                                "assignee": "ProductOwnerAgent",
+                                "description": f"Разрешить противоречие между утверждениями {new_claim['claim_id']} и {existing_claim_id}...",
+                                "goal": "Обеспечить целостность Базы Знаний.",
+                                "status": "PENDING", "retry_count": 0
+                            }
+                            # --- ИСПОЛЬЗУЕМ ПЕРЕДАННЫЙ ОБЪЕКТ ---
+                            world_model.add_task_to_plan(conflict_task)
+                            break 
+
+                if is_conflicted:
+                    new_claim['status'] = 'CONFLICTED'
+                    # --- ИСПОЛЬЗУЕМ ПЕРЕДАННЫЙ ОБЪЕКТ ---
+                    world_model.add_claims_to_kb(new_claim)
+                else:
+                    new_claim['status'] = 'VERIFIED'
+                    # --- ИСПОЛЬЗУЕМ ПЕРЕДАННЫЙ ОБЪЕКТ ---
+                    world_model.add_claims_to_kb(new_claim)
+                    verified_claims_for_log.append(new_claim)
+
+            print(f"--- Эксперт {assignee}: Задача выполнена, интегрировано {len(verified_claims_for_log)} непротиворечивых утверждений. ---")
+            return verified_claims_for_log
         except Exception as e:
             print(f"!!! КРИТИЧЕСКАЯ ОШИБКА в ExpertTeam при выполнении задачи '{description}': {e}")
             return []

@@ -38,6 +38,33 @@ class WorldModel:
         self._load_state_from_disk()
 
         print("-> WorldModel инициализирован (состояние загружено, если найдено).")
+    def add_task_to_plan(self, task: dict, phase_name: str = "Phase 1: Глубокая Разведка Активов ТГУ"):
+        """
+        Добавляет новую задачу в указанную или активную фазу плана.
+        """
+        print(f"   [WorldModel] -> Добавляю новую задачу '{task.get('task_id')}' в план...")
+        plan = self.dynamic_knowledge.get("strategic_plan", {})
+        phase_found = False
+        # Ищем фазу по имени
+        for p in plan.get("phases", []):
+            if p.get("phase_name") == phase_name:
+                p.get("tasks", []).insert(0, task) # Вставляем в начало, чтобы повысить приоритет
+                phase_found = True
+                break
+        
+        # Если фаза по имени не найдена, ищем активную
+        if not phase_found:
+            for p in plan.get("phases", []):
+                if p.get("status") == "IN_PROGRESS":
+                    p.get("tasks", []).insert(0, task)
+                    phase_found = True
+                    break
+
+        if phase_found:
+            print(f"   [WorldModel] <- Задача '{task.get('task_id')}' добавлена.")
+            self._save_state_to_disk()
+        else:
+            print(f"!!! [WorldModel] ОШИБКА: Не найдено подходящей фазы для добавления задачи.")
 
     # --- НОВЫЙ ПРИВАТНЫЙ МЕТОД ДЛЯ СОХРАНЕНИЯ ---
     def _save_state_to_disk(self):
@@ -85,8 +112,14 @@ class WorldModel:
         return active_tasks
 
     def add_claims_to_kb(self, claims: list):
-        """Добавляет список "Утверждений" в базу знаний и СОХРАНЯЕТ СОСТОЯНИЕ."""
-        if not claims or not isinstance(claims, list):
+        """
+        Добавляет или ОБНОВЛЯЕТ список "Утверждений" в базе знаний и СОХРАНЯЕТ СОСТОЯНИЕ.
+        Теперь может обрабатывать и одиночные утверждения.
+        """
+        if not isinstance(claims, list):
+            claims = [claims] # Оборачиваем одиночный claim в список
+
+        if not claims:
             return
         
         added_count = 0
@@ -96,8 +129,8 @@ class WorldModel:
                 added_count += 1
         
         if added_count > 0:
-            print(f"   [WorldModel] Добавлено {added_count} утверждений в Базу Знаний.")
-            self._save_state_to_disk() # <-- Сохранение
+            print(f"   [WorldModel] Добавлено/обновлено {added_count} утверждений в Базе Знаний.")
+            self._save_state_to_disk()
 
     def update_task_status(self, task_id: str, new_status: str):
         """Находит задачу по ID, обновляет ее статус и СОХРАНЯЕТ СОСТОЯНИЕ."""

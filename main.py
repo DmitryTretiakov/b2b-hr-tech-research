@@ -150,17 +150,16 @@ def main():
         
         # --- ОБНОВЛЕННЫЙ БЛОК TRY...EXCEPT ---
         try:
-            claims = expert_team.execute_task(task_to_run, world_model.get_full_context())
+            claims = expert_team.execute_task(task_to_run, world_model)
             
             if claims:
-                world_model.add_claims_to_kb(claims)
                 world_model.update_task_status(task_id, 'COMPLETED')
+                world_model.log_transaction({'task': task_to_run, 'results': claims})
             else:
-                # Если claims пустые, но ошибки не было, значит, эксперт просто ничего не нашел
-                world_model.update_task_status(task_id, 'FAILED')
-                print(f"!!! ОРКЕСТРАТОР: Эксперт завершил задачу {task_id}, но не сгенерировал утверждений. Задача провалена.")
-                
-            world_model.log_transaction({'task': task_to_run, 'results': claims if claims else "No claims generated"})
+                # Если claims пустые, но ошибки не было, значит, эксперт ничего не нашел или был конфликт
+                # Статус задачи уже обновлен внутри execute_task, если нужно
+                # Просто логируем, что результат пустой
+                world_model.log_transaction({'task': task_to_run, 'results': "No new verified claims generated"})
 
         except SearchAPIFailureError as e:
             print(f"!!! ОРКЕСТРАТОР: Произошла ошибка поиска при выполнении задачи {task_id}. Ошибка: {e}")
