@@ -3,7 +3,7 @@ import os
 import time # <-- ДОБАВИТЬ ИМПОРТ
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
-
+import argparse
 from core.world_model import WorldModel
 from agents.chief_strategist import ChiefStrategist
 from agents.expert_team import ExpertTeam
@@ -22,6 +22,13 @@ TASK_COOLDOWN_SECONDS = 15
 STRATEGIST_COOLDOWN_SECONDS = 30 
 
 def main():
+    parser = argparse.ArgumentParser(description="Автономный Проектный Офис")
+    parser.add_argument(
+        '--fresh-start',
+        action='store_true',
+        help='Начать новое исследование, игнорируя сохраненное состояние.'
+    )
+    args = parser.parse_args()
     # --- ИНИЦИАЛИЗАЦИЯ ---
     load_dotenv()
     print("Инициализация системы 'Автономный Проектный Офис'...")
@@ -108,7 +115,8 @@ def main():
                 "comment": "С высокой вероятностью (90%) основная команда разработки будет находиться здесь. Финансовые расчеты (зарплаты, аренда) должны в первую очередь учитывать этот регион. Если данных по региону нет, использовать данные по Москве/РФ с предложением поправочного коэффициента."
             },
             "main_goal": "Подготовить высококачественную, убедительную аналитическую записку для коммерческого директора ТГУ, предлагающую концепцию нового продукта в рамках существующей экосистемы iDO. **Цель записки — не просто предоставить информацию, а продемонстрировать мою способность взять на себя роль Владельца Продукта (Product Owner) для этого конкретного проекта, отвечая за его концепцию, логику и развитие от идеи до прототипа.**"
-        }
+        },
+        force_fresh_start=args.fresh_start 
     )
 
     search_agent = SearchAgent(
@@ -123,8 +131,14 @@ def main():
     # --- ЗАПУСК РАБОТЫ ---
     print("\n--- ЗАПУСК ОСНОВНОГО ЦИКЛА ОРКЕСТРАТОРА ---")
 
-    plan = strategist.create_strategic_plan(world_model.get_full_context())
-    world_model.update_strategic_plan(plan)
+    # --- СОЗДАЕМ ПЛАН, ТОЛЬКО ЕСЛИ ЕГО НЕТ ---
+    # Если мы не начинаем с чистого листа и план уже есть, мы его не перезаписываем.
+    if not world_model.get_full_context()['dynamic_knowledge']['strategic_plan']:
+        print("\n--- Стратегический план не найден. Создаю новый... ---")
+        plan = strategist.create_strategic_plan(world_model.get_full_context())
+        world_model.update_strategic_plan(plan)
+    else:
+        print("\n--- Обнаружен существующий стратегический план. Продолжаю работу... ---")
 
     while True:
         active_tasks = world_model.get_active_tasks()

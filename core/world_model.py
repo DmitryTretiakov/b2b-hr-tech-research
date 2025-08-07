@@ -12,7 +12,7 @@ class WorldModel:
     Управляет планом, базой знаний и логами.
     Сохраняет свое состояние на диск при каждом изменении.
     """
-    def __init__(self, static_context: dict, output_dir: str = "output"):
+    def __init__(self, static_context: dict, output_dir: str = "output", force_fresh_start: bool = False):
         self.static_context = static_context
         self.output_dir = output_dir
         self.kb_dir = os.path.join(output_dir, "knowledge_base")
@@ -21,7 +21,13 @@ class WorldModel:
         
         # --- НОВЫЙ АТРИБУТ ДЛЯ ФАЙЛА СОСТОЯНИЯ ---
         self.state_file_path = os.path.join(self.output_dir, "system_state.json")
-
+        if force_fresh_start and os.path.exists(self.state_file_path):
+            print(f"!!! [WorldModel] Активирован режим 'fresh-start'. Удаляю старый файл состояния: {self.state_file_path}")
+            try:
+                os.remove(self.state_file_path)
+            except OSError as e:
+                print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось удалить файл состояния. Ошибка: {e}")
+                
         # Создаем все директории, если их нет
         os.makedirs(self.kb_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)
