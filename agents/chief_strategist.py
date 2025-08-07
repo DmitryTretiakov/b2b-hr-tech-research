@@ -1,13 +1,16 @@
 # agents/chief_strategist.py
 import json
+import os
 from pydantic import BaseModel, Field 
-from typing import List, Literal
+from typing import List, Literal, TYPE_CHECKING 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.output_parsers import PydanticOutputParser
 
+# --- РЕШЕНИЕ ПРОБЛЕМЫ ЦИКЛИЧЕСКОЙ ЗАВИСИМОСТИ ТИПОВ ---
+if TYPE_CHECKING:
+    from core.world_model import WorldModel
+
 # --- ОПРЕДЕЛЕНИЕ СТРУКТУРЫ ПЛАНА С ПОМОЩЬЮ PYDANTIC ---
-# Это наш "контракт" с LLM. Модель будет обязана вернуть JSON,
-# соответствующий этой структуре.
 
 class Task(BaseModel):
     """Описывает одну конкретную задачу в рамках фазы проекта."""
@@ -37,7 +40,7 @@ class RagQuerySet(BaseModel):
     market_and_finance_query: str = Field(description="Сжатый поисковый запрос о рынке, финансах, ROI, бизнес-модели.")
     tech_and_assets_query: str = Field(description="Сжатый поисковый запрос о технологиях, стеке, сильных и слабых сторонах активов ТГУ.")
     competitor_query: str = Field(description="Сжатый поисковый запрос о конкурентах, их продуктах и позиционировании.")
-    
+
 class StrategicPlan(BaseModel):
     """Описывает полный стратегический план проекта."""
     main_goal_status: Literal['IN_PROGRESS', 'READY_FOR_FINAL_BRIEF', 'FAILED'] = Field(description="Общий статус всего проекта. IN_PROGRESS, пока идет работа.")
@@ -228,22 +231,33 @@ class ChiefStrategist:
         
         return self._invoke_llm_for_text(prompt)
 
-    def _generate_updated_plan(self, situation_summary: str, world_model_context: dict) -> dict:
+    def _generate_updated_plan(self, situation_summary: str, full_context: dict, relevant_kb: dict) -> dict:
         """Шаг Б рефлексии: Превращение выводов в конкретный JSON-план с помощью Pydantic."""
         print("      [Стратег.Рефлексия] Шаг Б: Превращаю выводы в конкретный план...")
-        original_plan_str = json.dumps(world_model_context['dynamic_knowledge']['strategic_plan'], ensure_ascii=False, indent=2)
+        
+        # Создаем "облегченный" контекст для передачи в LLM
+        lean_context_for_llm = {
+            "static_context": full_context['static_context'],
+            "dynamic_knowledge": {
+                # Передаем оригинальный план, чтобы модель знала, что обновлять
+                "strategic_plan": full_context['dynamic_knowledge']['strategic_plan'],
+                # Передаем ТОЛЬКО релевантный срез из Базы Знаний
+                "relevant_knowledge_base_slice": relevant_kb 
+            }
+        }
+        lean_context_str = json.dumps(lean_context_for_llm, ensure_ascii=False, indent=2)
 
         prompt = f"""**ТВОЯ РОЛЬ:** Ассистент-планировщик.
-**ТВОЯ ЗАДАЧА:** Тебе предоставлены выводы от Главного Стратега и оригинальный план. Твоя задача - обновить оригинальный план в соответствии с выводами.
+**ТВОЯ ЗАДАЧА:** Тебе предоставлены выводы от Главного Стратега и текущий план. Твоя задача - обновить план в соответствии с выводами, опираясь на **релевантные факты из Базы Знаний**.
 
 **ВЫВОДЫ ГЛАВНОГО СТРАТЕГА:**
 ---
 {situation_summary}
 ---
 
-**ОРИГИНАЛЬНЫЙ ПЛАН, КОТОРЫЙ НУЖНО ОБНОВИТЬ:**
+**ОБЛЕГЧЕННЫЙ КОНТЕКСТ (ТЕКУЩИЙ ПЛАН И РЕЛЕВАНТНЫЕ ФАКТЫ):**
 ---
-{original_plan_str}
+{lean_context_str}
 ---
 
 **ИНСТРУКЦИИ ПО ОБНОВЛЕНИЮ:**

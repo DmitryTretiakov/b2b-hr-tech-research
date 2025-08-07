@@ -1,6 +1,6 @@
 # main.py
 import os
-import time # <-- ДОБАВИТЬ ИМПОРТ
+import time 
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 import argparse
@@ -8,7 +8,7 @@ from core.world_model import WorldModel
 from agents.chief_strategist import ChiefStrategist
 from agents.expert_team import ExpertTeam
 from agents.search_agent import SearchAgent
-from utils.helpers import SearchAPIFailureError # <-- ДОБАВИТЬ ИМПОРТ
+from utils.helpers import SearchAPIFailureError
 
 # --- КОНСТАНТЫ ДЛЯ УПРАВЛЕНИЯ СКОРОСТЬЮ И ПОПЫТКАМИ ---
 MAX_RETRIES = 3
@@ -162,7 +162,7 @@ def main():
         
         if not active_tasks:
             print("\n--- Все задачи текущей фазы выполнены. Запускаю рефлексию Стратега... ---")
-            updated_plan = strategist.reflect_and_update_plan(world_model.get_full_context())
+            updated_plan = strategist.reflect_and_update_plan(world_model)
             world_model.update_strategic_plan(updated_plan)
             print(f"   [Оркестратор] Пауза после рефлексии на {STRATEGIST_COOLDOWN_SECONDS} секунд...")
             time.sleep(STRATEGIST_COOLDOWN_SECONDS)
