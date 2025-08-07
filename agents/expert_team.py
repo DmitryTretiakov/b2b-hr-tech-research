@@ -147,97 +147,101 @@ URL: "{url}"
             return {"type": "UNKNOWN", "trust": 0.2}
         
     def execute_task(self, task: dict, world_model: WorldModel) -> list:
-        """Основной метод, запускающий полный цикл работы над одной задачей."""
         assignee = task['assignee']
         description = task['description']
         goal = task['goal']
         world_model_context = world_model.get_full_context()
         print(f"\n--- Эксперт {assignee}: Приступаю к задаче '{description}' ---")
 
-        try:
-            # 1. Декомпозиция задачи
-            queries_dict = self._decompose_task(assignee, description, goal, world_model_context)
-            search_queries = queries_dict.get('queries', [])
-            if not search_queries: return []
+        # Шаги 1-5 остаются без изменений, но без глобального try...except
+        # 1. Декомпозиция задачи
+        queries_dict = self._decompose_task(assignee, description, goal, world_model_context)
+        search_queries = queries_dict.get('queries', [])
+        if not search_queries: return []
 
-            # 2. Поиск и форматирование результатов
-            raw_results = [self.search_agent.search(q) for q in search_queries]
-            search_results_str = "\n".join([format_search_results_for_llm(r) for r in raw_results])
-            
-            if not search_results_str.strip() or "Поиск не дал результатов" in search_results_str:
-                print(f"!!! Эксперт {assignee}: Поиск не дал результатов. Задача не может быть выполнена.")
-                return []
-
-            # 3. Написание черновика "Утверждений"
-            draft_claims_dict = self._create_draft_claims(assignee, description, goal, search_results_str, world_model_context)
-            draft_claims = draft_claims_dict.get('claims', [])
-            if not draft_claims: return []
-
-            # --- НОВЫЙ ШАГ 3.5: АУДИТ ИСТОЧНИКОВ И ОБОГАЩЕНИЕ УТВЕРЖДЕНИЙ ---
-            print(f"   [Эксперт {assignee}] Шаг 3.5/6: Провожу аудит источников для {len(draft_claims)} утверждений...")
-            enriched_claims = []
-            for claim in draft_claims:
-                source_audit_results = self._audit_source(claim['source_link'])
-                claim['source_type'] = source_audit_results['type']
-                claim['source_trust'] = source_audit_results['trust']
-                # Корректируем изначальную уверенность с учетом доверия к источнику
-                claim['confidence_score'] *= source_audit_results['trust']
-                enriched_claims.append(claim)
-            print(f"   [Эксперт {assignee}] -> Аудит источников завершен.")
-
-            # 4. Аудит
-            vulnerabilities_dict = self._audit_claims(draft_claims, world_model_context)
-            vulnerabilities = vulnerabilities_dict.get('vulnerabilities', {})
-            
-            # 5. Финализация
-            final_claims_dict = self._finalize_claims(assignee, description, search_results_str, draft_claims, vulnerabilities, world_model_context)
-            final_claims = final_claims_dict.get('claims', [])
-            if not final_claims: return []
-
-            # --- ИСПРАВЛЕННЫЙ ШАГ 6: ПОШТУЧНАЯ ВЕРИФИКАЦИЯ И ИНТЕГРАЦИЯ ---
-            print(f"   [Эксперт {assignee}] Шаг 6/6: Провожу финальную верификацию и интеграцию {len(final_claims)} утверждений...")
-            verified_claims_for_log = []
-            knowledge_base = world_model_context['dynamic_knowledge']['knowledge_base']
-
-            for new_claim in final_claims:
-                is_conflicted = False
-                # Проверяем новый claim на конфликт со всей текущей базой знаний
-                for existing_claim_id, existing_claim in knowledge_base.items():
-                    if new_claim['claim_id'] == existing_claim_id: continue
-
-                    if self._are_claims_related(existing_claim['statement'], new_claim['statement']):
-                        relationship = self._perform_nli_audit(existing_claim, new_claim)
-                        if relationship == "CONTRADICTS":
-                            print(f"!!! [Детектор Противоречий] ОБНАРУЖЕН КОНФЛИКТ между новым claim '{new_claim['claim_id']}' и существующим '{existing_claim_id}'")
-                            is_conflicted = True
-                            
-                            existing_claim['status'] = 'CONFLICTED'
-                            world_model.add_claims_to_kb(existing_claim)
-                            
-                            conflict_task = {
-                                "task_id": f"conflict_{str(uuid.uuid4())[:8]}",
-                                "assignee": "ProductOwnerAgent",
-                                "description": f"Разрешить противоречие между утверждениями {new_claim['claim_id']} и {existing_claim_id}. Найди третий, решающий источник.",
-                                "goal": "Обеспечить целостность Базы Знаний.",
-                                "status": "PENDING", "retry_count": 0
-                            }
-                            world_model.add_task_to_plan(conflict_task)
-                            break # Нашли конфликт, прекращаем проверку для этого new_claim
-
-                # Решение о судьбе нового claim принимается здесь, ПОСЛЕ проверки всей базы
-                if is_conflicted:
-                    new_claim['status'] = 'CONFLICTED'
-                    world_model.add_claims_to_kb(new_claim)
-                else:
-                    new_claim['status'] = 'VERIFIED'
-                    world_model.add_claims_to_kb(new_claim)
-                    verified_claims_for_log.append(new_claim)
-
-            print(f"--- Эксперт {assignee}: Задача выполнена, интегрировано {len(verified_claims_for_log)} непротиворечивых утверждений. ---")
-            return verified_claims_for_log
-        except Exception as e:
-            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА в ExpertTeam при выполнении задачи '{description}': {e}")
+        # 2. Поиск и форматирование результатов
+        raw_results = [self.search_agent.search(q) for q in search_queries]
+        search_results_str = "\n".join([format_search_results_for_llm(r) for r in raw_results])
+        if not search_results_str.strip() or "Поиск не дал результатов" in search_results_str:
+            print(f"!!! Эксперт {assignee}: Поиск не дал результатов.")
             return []
+
+        # 3. Написание черновика "Утверждений"
+        draft_claims_dict = self._create_draft_claims(assignee, description, goal, world_model_context)
+        draft_claims = draft_claims_dict.get('claims', [])
+        if not draft_claims: return []
+
+        # 3.5 Аудит источников
+        print(f"   [Эксперт {assignee}] Шаг 3.5/6: Провожу аудит источников...")
+        enriched_claims = []
+        for claim in draft_claims:
+            source_audit_results = self._audit_source(claim['source_link'])
+            claim['source_type'] = source_audit_results['type']
+            claim['source_trust'] = source_audit_results['trust']
+            claim['confidence_score'] *= source_audit_results['trust']
+            enriched_claims.append(claim)
+        print(f"   [Эксперт {assignee}] -> Аудит источников завершен.")
+
+        # 4. Аудит содержимого
+        vulnerabilities_dict = self._audit_claims(enriched_claims, world_model_context)
+        vulnerabilities = vulnerabilities_dict.get('vulnerabilities', {})
+        
+        # 5. Финализация
+        final_claims_dict = self._finalize_claims(assignee, description, enriched_claims, vulnerabilities, world_model_context)
+        final_claims = final_claims_dict.get('claims', [])
+        if not final_claims: return []
+
+        # --- ФИНАЛЬНЫЙ ШАГ 6: ИНТЕГРАЦИЯ С ИСПОЛЬЗОВАНИЕМ СЕМАНТИЧЕСКОГО ИНДЕКСА ---
+        print(f"   [Эксперт {assignee}] Шаг 6/6: Провожу финальную верификацию и интеграцию {len(final_claims)} утверждений...")
+        verified_claims_for_log = []
+        knowledge_base = world_model_context['dynamic_knowledge']['knowledge_base']
+
+        for new_claim in final_claims:
+            is_conflicted = False
+            
+            # 1. ОДИН быстрый вызов к индексу для поиска кандидатов
+            similar_ids = world_model.semantic_index.find_similar_claim_ids(new_claim['statement'], top_k=5)
+            
+            if similar_ids:
+                print(f"      [Детектор Связи] -> Найдены семантически близкие кандидаты: {similar_ids}")
+            
+            # 2. Дорогостоящая LLM-проверка только для 5 кандидатов, а не для всей базы
+            for existing_claim_id in similar_ids:
+                if new_claim['claim_id'] == existing_claim_id: continue
+                
+                existing_claim = knowledge_base.get(existing_claim_id)
+                if not existing_claim: continue
+
+                # NLI-аудит вызывается только здесь
+                relationship = self._perform_nli_audit(existing_claim, new_claim)
+                if relationship == "CONTRADICTS":
+                    print(f"!!! [Детектор Противоречий] ОБНАРУЖЕН КОНФЛИКТ между '{new_claim['claim_id']}' и '{existing_claim_id}'")
+                    is_conflicted = True
+                    
+                    existing_claim['status'] = 'CONFLICTED'
+                    world_model.add_claims_to_kb(existing_claim)
+                    
+                    conflict_task = {
+                        "task_id": f"conflict_{str(uuid.uuid4())[:8]}",
+                        "assignee": "ProductOwnerAgent",
+                        "description": f"Разрешить противоречие между утверждениями {new_claim['claim_id']} и {existing_claim_id}. Найди третий, решающий источник.",
+                        "goal": "Обеспечить целостность Базы Знаний.",
+                        "status": "PENDING", "retry_count": 0
+                    }
+                    world_model.add_task_to_plan(conflict_task)
+                    break # Нашли конфликт, прекращаем проверку для этого new_claim
+
+            # 3. Решение о судьбе нового утверждения
+            if is_conflicted:
+                new_claim['status'] = 'CONFLICTED'
+                world_model.add_claims_to_kb(new_claim)
+            else:
+                new_claim['status'] = 'VERIFIED'
+                world_model.add_claims_to_kb(new_claim)
+                verified_claims_for_log.append(new_claim)
+
+        print(f"--- Эксперт {assignee}: Задача выполнена, интегрировано {len(verified_claims_for_log)} непротиворечивых утверждений. ---")
+        return verified_claims_for_log
 
     def _decompose_task(self, assignee: str, description: str, goal: str, context: dict) -> dict:
         """Шаг 1: Генерирует поисковые запросы."""
