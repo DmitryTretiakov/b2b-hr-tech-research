@@ -193,7 +193,11 @@ class ChiefStrategist:
         """
         print("      [Стратег.RAG] -> Декомпозирую общую мысль на сфокусированные запросы...")
         # Используем быструю модель для этой задачи
-        query_gen_llm = self.llms["expert_flash"]
+        query_gen_llm = ChatGoogleGenerativeAI(
+            model="models/gemma-3-27b-it",
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
+            temperature=0.0
+        )
 
         prompt = f"""**ТВОЯ ЗАДАЧА:** Ты — системный аналитик. Твоя цель — преобразовать общую аналитическую сводку в несколько конкретных, сжатых поисковых запросов для векторной базы данных.
 
@@ -208,7 +212,18 @@ class ChiefStrategist:
 Верни результат в виде ОДНОГО JSON-объекта.
 """
         
-        report = self._invoke_llm_for_json(prompt, RagQuerySet)
+        parser = PydanticOutputParser(pydantic_object=RagQuerySet)
+        prompt_with_instructions = f"{prompt}\n\n{parser.get_format_instructions()}"
+        
+        try:
+            response = query_gen_llm.invoke(prompt_with_instructions)
+            parsed_object = parser.parse(response.content)
+            report = parsed_object.model_dump()
+        except Exception as e:
+            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА при генерации RAG-запросов: {e}")
+            report = {}
+        # --------------------------------------------------------------------
+
         return report
     
     def _summarize_situation(self, world_model_context: dict) -> str:
@@ -350,7 +365,11 @@ class ChiefStrategist:
         Использует быструю и дешевую модель.
         """
         print("      [Валидатор] -> Проверяю артефакт на соответствие критериям качества...")
-        validator_llm = self.llms["expert_flash"] # Быстрая модель для валидации
+        validator_llm = ChatGoogleGenerativeAI(
+            model="models/gemma-3-27b-it",
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
+            temperature=0.0
+        )
 
         required_sections_str = ", ".join(required_sections)
 
@@ -370,8 +389,18 @@ class ChiefStrategist:
 Проанализируй текст и верни результат в формате JSON. Если все критерии выполнены, `is_valid` должно быть `True`. Если хотя бы один критерий нарушен, `is_valid` должно быть `False`, а в `reasons` укажи, что именно не так.
 """
         
-        report = self._invoke_llm_for_json(prompt, ValidationReport)
+        parser = PydanticOutputParser(pydantic_object=ValidationReport)
+        prompt_with_instructions = f"{prompt}\n\n{parser.get_format_instructions()}"
         
+        try:
+            response = validator_llm.invoke(prompt_with_instructions)
+            parsed_object = parser.parse(response.content)
+            report = parsed_object.model_dump()
+        except Exception as e:
+            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА при валидации артефакта: {e}")
+            report = {"is_valid": False, "reasons": ["Ошибка парсинга ответа валидатора."]}
+        # --------------------------------------------------------------------
+            
         if report.get('is_valid', False):
             print("      [Валидатор] <- Артефакт прошел проверку качества.")
         else:
