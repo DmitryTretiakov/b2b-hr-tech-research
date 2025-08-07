@@ -22,6 +22,8 @@ class Claim(BaseModel):
     source_quote: str = Field(description="Прямая цитата из источника, которая доказывает утверждение.")
     confidence_score: float = Field(description="Оценка уверенности в достоверности источника от 0.0 до 1.0.")
     status: Literal["UNVERIFIED", "VERIFIED"] = Field(description="Статус утверждения. На этапе создания всегда 'UNVERIFIED'.")
+    source_type: str = Field(default="UNKNOWN", description="Тип источника (например, OFFICIAL_DOCS, FORUM_POST).")
+    source_trust: float = Field(default=0.2, description="Коэффициент доверия к самому ИСТОЧНИКУ, от 0.0 до 1.0.")
 
 class ClaimList(BaseModel):
     """Описывает список 'Утверждений'."""
@@ -31,6 +33,17 @@ class AuditReport(BaseModel):
     """Описывает отчет аудитора с перечнем уязвимостей для каждого утверждения."""
     vulnerabilities: Dict[str, List[str]] = Field(description="Словарь, где ключ - это claim_id, а значение - список найденных уязвимостей (текстовых описаний).")
 
+SOURCE_TRUST_MULTIPLIERS = {
+    "OFFICIAL_DOCS": 1.0,      # Официальная документация продукта или технологии
+    "MAJOR_TECH_MEDIA": 0.9,   # Статья на крупном IT-ресурсе (Habr, CNews, TechCrunch)
+    "ACADEMIC_PAPER": 0.8,     # Научная статья, публикация в рецензируемом журнале
+    "COMPANY_BLOG": 0.7,       # Официальный блог компании-разработчика или консалтинговой фирмы
+    "PRESS_RELEASE": 0.6,      # Официальный пресс-релиз
+    "NEWS_ARTICLE": 0.5,       # Новостная статья в неспециализированном СМИ
+    "MARKETING_CONTENT": 0.4,  # Рекламная статья, лендинг, брошюра
+    "FORUM_POST": 0.3,         # Пост на форуме, Stack Overflow, Reddit
+    "UNKNOWN": 0.2             # Неизвестный или неклассифицируемый источник
+}
 
 class ExpertTeam:
     """
@@ -58,7 +71,38 @@ class ExpertTeam:
         except Exception as e:
             print(f"!!! КРИТИЧЕСКАЯ ОШИБКА LLM/Парсера в ExpertTeam: {e}")
             return {}
+    def _audit_source(self, url: str) -> dict:
+        """
+        Классифицирует URL с помощью gemma-3-27b-it и возвращает тип и коэффициент доверия.
+        """
+        print(f"      [Аудитор Источников] -> Классифицирую URL: {url}")
+        auditor_llm = self.llms["source_auditor"]
+        
+        source_types = list(SOURCE_TRUST_MULTIPLIERS.keys())
+        
+        prompt = f"""Твоя задача - классифицировать тип источника по его URL.
+URL: "{url}"
 
+Выбери ОДИН наиболее подходящий тип из этого списка: {source_types}
+
+Верни в ответе ТОЛЬКО и ИСКЛЮЧИТЕЛЬНО название типа. Например: OFFICIAL_DOCS
+"""
+        try:
+            response = auditor_llm.invoke(prompt)
+            # Убираем лишние пробелы и возможные markdown-конструкции
+            source_type = response.content.strip().replace("`", "")
+            
+            if source_type not in source_types:
+                print(f"      [Аудитор Источников] !!! Внимание: Модель вернула невалидный тип '{source_type}'. Используется UNKNOWN.")
+                source_type = "UNKNOWN"
+
+            trust_multiplier = SOURCE_TRUST_MULTIPLIERS.get(source_type, 0.2)
+            print(f"      [Аудитор Источников] <- URL классифицирован как {source_type} с доверием {trust_multiplier}.")
+            return {"type": source_type, "trust": trust_multiplier}
+        except Exception as e:
+            print(f"      [Аудитор Источников] !!! КРИТИЧЕСКАЯ ОШИБКА при классификации URL: {e}")
+            return {"type": "UNKNOWN", "trust": 0.2}
+        
     def execute_task(self, task: dict, world_model_context: dict) -> list:
         """Основной метод, запускающий полный цикл работы над одной задачей."""
         assignee = task['assignee']
@@ -84,6 +128,18 @@ class ExpertTeam:
             draft_claims_dict = self._create_draft_claims(assignee, description, goal, search_results_str, world_model_context)
             draft_claims = draft_claims_dict.get('claims', [])
             if not draft_claims: return []
+
+            # --- НОВЫЙ ШАГ 3.5: АУДИТ ИСТОЧНИКОВ И ОБОГАЩЕНИЕ УТВЕРЖДЕНИЙ ---
+            print(f"   [Эксперт {assignee}] Шаг 3.5/6: Провожу аудит источников для {len(draft_claims)} утверждений...")
+            enriched_claims = []
+            for claim in draft_claims:
+                source_audit_results = self._audit_source(claim['source_link'])
+                claim['source_type'] = source_audit_results['type']
+                claim['source_trust'] = source_audit_results['trust']
+                # Корректируем изначальную уверенность с учетом доверия к источнику
+                claim['confidence_score'] *= source_audit_results['trust']
+                enriched_claims.append(claim)
+            print(f"   [Эксперт {assignee}] -> Аудит источников завершен.")
 
             # 4. Аудит
             vulnerabilities_dict = self._audit_claims(draft_claims, world_model_context)

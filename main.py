@@ -44,6 +44,12 @@ def main():
                 google_api_key=os.getenv("GOOGLE_API_KEY"),
                 temperature=0.1 # Очень низкая температура для надежной генерации JSON
             ),
+            # --- НОВАЯ МОДЕЛЬ ДЛЯ АУДИТА ИСТОЧНИКОВ ---
+            "source_auditor": ChatGoogleGenerativeAI(
+                model="models/gemma-3-27b-it",
+                google_api_key=os.getenv("GOOGLE_API_KEY"),
+                temperature=0.0 # Нулевая температура для максимальной предсказуемости в задачах классификации
+            )
         }
         print("-> Модели LLM успешно инициализированы с оптимальными настройками температуры.")
     except Exception as e:
