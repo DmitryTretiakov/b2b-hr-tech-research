@@ -73,6 +73,16 @@ class ArbitrationReport(BaseModel):
     losing_claim_id: str = Field(description="ID утверждения, которое было признано ложным/устаревшим.")
     decisive_source_link: str = Field(description="Прямая ссылка на новый, решающий источник, который помог разрешить конфликт.")
 
+class FinancialReport(BaseModel):
+    """Финансовый отчет, содержащий смету и прогноз в виде Markdown."""
+    report_title: str = Field(description="Заголовок отчета, например 'Смета на MVP и Прогноз Прибыли на 1-й Год'.")
+    markdown_content: str = Field(description="Полностью готовая Markdown-таблица и текстовые выводы.")
+
+class ProductBrief(BaseModel):
+    """Продуктовый бриф, содержащий описание и User Stories."""
+    product_description: str = Field(description="Детальное описание продукта 'Карьерный Навигатор'.")
+    user_stories: List[str] = Field(description="Список User Stories в формате 'Как <роль>, я хочу <действие>, чтобы <ценность>'.")
+
 SOURCE_TRUST_MULTIPLIERS = {
     "OFFICIAL_DOCS": 1.0,      # Официальная документация продукта или технологии
     "MAJOR_TECH_MEDIA": 0.9,   # Статья на крупном IT-ресурсе (Habr, CNews, TechCrunch)
@@ -308,145 +318,127 @@ class ExpertTeam:
     
         
     def execute_task(self, task: dict, world_model: WorldModel) -> list:
-        if task.get('assignee') == 'ProductOwnerAgent':
-            self._execute_arbitration_task(task, world_model)
-            # Задачи арбитра не генерируют новых утверждений, они меняют старые.
-            # Поэтому мы возвращаем пустой список.
-            return []
-        assignee = task['assignee']
-        description = task['description']
-        goal = task['goal']
+        # --- 1. Определение общих переменных ---
+        assignee = task.get('assignee')
+        description = task.get('description', '')
+        goal = task.get('goal', '')
         world_model_context = world_model.get_full_context()
-        print(f"\n--- Эксперт {assignee}: Приступаю к задаче '{description}' ---")
 
-        # Шаги 1-5 остаются без изменений, но без глобального try...except
-        # 1. Декомпозиция задачи
-        queries_dict = self._decompose_task(assignee, description, goal, world_model_context)
-        search_queries = queries_dict.get('queries', [])
-        if not search_queries: return []
-
-        # 2. Поиск и форматирование результатов
-        raw_results = [self.search_agent.search(q) for q in search_queries]
-        search_results_str = "\n".join([format_search_results_for_llm(r) for r in raw_results])
-        if not search_results_str.strip() or "Поиск не дал результатов" in search_results_str:
-            print(f"!!! Эксперт {assignee}: Поиск не дал результатов.")
+        # --- 2. Главный диспетчер задач ---
+        if assignee == 'ProductOwnerAgent':
+            self._execute_arbitration_task(task, world_model)
+            return []
+        
+        elif assignee == 'FinancialModelAgent':
+            self._execute_financial_task(task, world_model)
             return []
 
-        # 3. Написание черновика "Утверждений"
-        draft_claims_dict = self._create_draft_claims(assignee, description, goal, world_model_context)
-        draft_claims = draft_claims_dict.get('claims', [])
-        if not draft_claims: return []
-
-        # 3.5 Пакетный аудит источников
-        print(f"   [Эксперт {assignee}] Шаг 3.5/6: Запускаю пакетный аудит источников...")
+        elif assignee == 'ProductManagerAgent':
+            self._execute_product_task(task, world_model)
+            return []
         
-        # 3.5.1: Собрать все уникальные URL из черновиков утверждений
-        unique_urls = list(set(
-            claim['source_link'] 
-            for claim in draft_claims 
-            if 'source_link' in claim and claim['source_link']
-        ))
-        
-        # 3.5.2: Вызвать пакетный метод ОДИН РАЗ
-        batch_audit_report = self._batch_audit_sources(unique_urls)
-        
-        # 3.5.3: Обогатить утверждения результатами пакетного аудита
-        enriched_claims = []
-        for claim in draft_claims:
-            url = claim.get('source_link')
+        # --- 3. Стандартный конвейер для агентов-исследователей ---
+        else:
+            print(f"\n--- Эксперт {assignee}: Приступаю к задаче '{description}' ---")
             
-            # Получаем результат аудита из словаря, с безопасным фолбэком
-            audit_result = batch_audit_report.get(url, {"type": "UNKNOWN", "trust": 0.2})
+            # Шаг 1: Декомпозиция задачи
+            queries_dict = self._decompose_task(assignee, description, goal, world_model_context)
+            search_queries = queries_dict.get('queries', [])
+            if not search_queries: return []
+
+            # Шаг 2: Поиск и форматирование результатов
+            raw_results = [self.search_agent.search(q) for q in search_queries]
+            search_results_str = "\n".join([format_search_results_for_llm(r) for r in raw_results])
+            if not search_results_str.strip() or "Поиск не дал результатов" in search_results_str:
+                print(f"!!! Эксперт {assignee}: Поиск не дал результатов.")
+                return []
+
+            # Шаг 3: Написание черновика "Утверждений"
+            draft_claims_dict = self._create_draft_claims(assignee, description, goal, search_results_str, world_model_context)
+            draft_claims = draft_claims_dict.get('claims', [])
+            if not draft_claims: return []
+
+            # Шаг 3.5: Пакетный аудит источников
+            print(f"   [Эксперт {assignee}] Шаг 3.5/6: Запускаю пакетный аудит источников...")
+            unique_urls = list(set(claim['source_link'] for claim in draft_claims if 'source_link' in claim and claim['source_link']))
+            batch_audit_report = self._batch_audit_sources(unique_urls)
             
-            claim['source_type'] = audit_result['type']
-            claim['source_trust'] = audit_result['trust']
+            enriched_claims = []
+            for claim in draft_claims:
+                url = claim.get('source_link')
+                audit_result = batch_audit_report.get(url, {"type": "UNKNOWN", "trust": 0.2})
+                claim['source_type'] = audit_result['type']
+                claim['source_trust'] = audit_result['trust']
+                base_confidence = claim.get('confidence_score', 0.7) 
+                claim['confidence_score'] = base_confidence * audit_result['trust']
+                enriched_claims.append(claim)
+            print(f"   [Эксперт {assignee}] -> Пакетный аудит и обогащение {len(enriched_claims)} утверждений завершены.")
+
+            # Шаг 4: Аудит содержимого
+            vulnerabilities_dict = self._audit_claims(enriched_claims, world_model_context)
+            vulnerabilities = vulnerabilities_dict.get('vulnerabilities', {})
             
-            # Пересчитываем confidence_score с учетом доверия к источнику
-            # Используем get с дефолтным значением на случай, если LLM не сгенерировал confidence_score
-            base_confidence = claim.get('confidence_score', 0.7) 
-            claim['confidence_score'] = base_confidence * audit_result['trust']
-            
-            enriched_claims.append(claim)
-            
-        print(f"   [Эксперт {assignee}] -> Пакетный аудит и обогащение {len(enriched_claims)} утверждений завершены.")
+            # Шаг 5: Финализация
+            final_claims_dict = self._finalize_claims(assignee, description, search_results_str, enriched_claims, vulnerabilities, world_model_context)
+            final_claims = final_claims_dict.get('claims', [])
+            if not final_claims: return []
 
-        # 4. Аудит содержимого
-        vulnerabilities_dict = self._audit_claims(enriched_claims, world_model_context)
-        vulnerabilities = vulnerabilities_dict.get('vulnerabilities', {})
-        
-        # 5. Финализация
-        final_claims_dict = self._finalize_claims(assignee, description, enriched_claims, vulnerabilities, world_model_context)
-        final_claims = final_claims_dict.get('claims', [])
-        if not final_claims: return []
+            # Шаг 6: Интеграция с пакетным NLI-аудитом
+            print(f"   [Эксперт {assignee}] Шаг 6/6: Провожу финальную верификацию и интеграцию {len(final_claims)} утверждений...")
+            verified_claims_for_log = []
+            knowledge_base = world_model_context['dynamic_knowledge']['knowledge_base']
 
-        # --- ФИНАЛЬНЫЙ ШАГ 6: ИНТЕГРАЦИЯ С ИСПОЛЬЗОВАНИЕМ ПАКЕТНОГО NLI-АУДИТА ---
-        print(f"   [Эксперт {assignee}] Шаг 6/6: Провожу финальную верификацию и интеграцию {len(final_claims)} утверждений...")
-        verified_claims_for_log = []
-        knowledge_base = world_model_context['dynamic_knowledge']['knowledge_base']
+            for new_claim in final_claims:
+                is_conflicted = False
+                similar_ids = world_model.semantic_index.find_similar_claim_ids(new_claim['statement'], top_k=5)
+                
+                if not similar_ids:
+                    new_claim['status'] = 'VERIFIED'
+                    world_model.add_claims_to_kb(new_claim)
+                    verified_claims_for_log.append(new_claim)
+                    continue
 
-        for new_claim in final_claims:
-            is_conflicted = False
-            
-            # 1. Найти семантически близких кандидатов (без изменений)
-            similar_ids = world_model.semantic_index.find_similar_claim_ids(new_claim['statement'], top_k=5)
-            
-            if not similar_ids:
-                # Если похожих нет, просто верифицируем утверждение
-                new_claim['status'] = 'VERIFIED'
-                world_model.add_claims_to_kb(new_claim)
-                verified_claims_for_log.append(new_claim)
-                continue
+                existing_claims_to_check = [knowledge_base[an_id] for an_id in similar_ids if an_id in knowledge_base]
+                
+                if not existing_claims_to_check:
+                    new_claim['status'] = 'VERIFIED'
+                    world_model.add_claims_to_kb(new_claim)
+                    verified_claims_for_log.append(new_claim)
+                    continue
 
-            # 2. Собрать полные данные по найденным кандидатам
-            existing_claims_to_check = []
-            for an_id in similar_ids:
-                if an_id in knowledge_base:
-                    existing_claims_to_check.append(knowledge_base[an_id])
-            
-            if not existing_claims_to_check:
-                new_claim['status'] = 'VERIFIED'
-                world_model.add_claims_to_kb(new_claim)
-                verified_claims_for_log.append(new_claim)
-                continue
+                audit_results = self._batch_nli_audit(new_claim, existing_claims_to_check)
 
-            # 3. Выполнить ОДИН пакетный NLI-аудит для нового утверждения против всех кандидатов
-            audit_results = self._batch_nli_audit(new_claim, existing_claims_to_check)
+                for result in audit_results:
+                    if result.get("relationship") == "CONTRADICTS":
+                        existing_claim_id = result['existing_claim_id']
+                        print(f"!!! [Детектор Противоречий] ОБНАРУЖЕН КОНФЛИКТ между '{new_claim['claim_id']}' и '{existing_claim_id}'")
+                        is_conflicted = True
+                        
+                        conflicted_claim = knowledge_base.get(existing_claim_id)
+                        if conflicted_claim:
+                            conflicted_claim['status'] = 'CONFLICTED'
+                            world_model.add_claims_to_kb(conflicted_claim)
+                        
+                        conflict_task = {
+                            "task_id": f"conflict_{str(uuid.uuid4())[:8]}",
+                            "assignee": "ProductOwnerAgent",
+                            "description": f"Разрешить противоречие между утверждениями {new_claim['claim_id']} и {existing_claim_id}. Найди третий, решающий источник.",
+                            "goal": "Обеспечить целостность Базы Знаний.",
+                            "status": "PENDING", "retry_count": 0
+                        }
+                        world_model.add_task_to_plan(conflict_task)
+                        break
 
-            # 4. Проанализировать результаты пакетного аудита
-            for result in audit_results:
-                if result.get("relationship") == "CONTRADICTS":
-                    existing_claim_id = result['existing_claim_id']
-                    print(f"!!! [Детектор Противоречий] ОБНАРУЖЕН КОНФЛИКТ между '{new_claim['claim_id']}' и '{existing_claim_id}'")
-                    is_conflicted = True
-                    
-                    # Помечаем существующее утверждение как конфликтное
-                    conflicted_claim = knowledge_base.get(existing_claim_id)
-                    if conflicted_claim:
-                        conflicted_claim['status'] = 'CONFLICTED'
-                        world_model.add_claims_to_kb(conflicted_claim)
-                    
-                    # Создаем задачу на разрешение конфликта
-                    conflict_task = {
-                        "task_id": f"conflict_{str(uuid.uuid4())[:8]}",
-                        "assignee": "ProductOwnerAgent",
-                        "description": f"Разрешить противоречие между утверждениями {new_claim['claim_id']} и {existing_claim_id}. Найди третий, решающий источник.",
-                        "goal": "Обеспечить целостность Базы Знаний.",
-                        "status": "PENDING", "retry_count": 0
-                    }
-                    world_model.add_task_to_plan(conflict_task)
-                    break # Одного противоречия достаточно, чтобы пометить новое утверждение как конфликтное
+                if is_conflicted:
+                    new_claim['status'] = 'CONFLICTED'
+                    world_model.add_claims_to_kb(new_claim)
+                else:
+                    new_claim['status'] = 'VERIFIED'
+                    world_model.add_claims_to_kb(new_claim)
+                    verified_claims_for_log.append(new_claim)
 
-            # 5. Решить судьбу нового утверждения
-            if is_conflicted:
-                new_claim['status'] = 'CONFLICTED'
-                world_model.add_claims_to_kb(new_claim)
-            else:
-                new_claim['status'] = 'VERIFIED'
-                world_model.add_claims_to_kb(new_claim)
-                verified_claims_for_log.append(new_claim)
-
-        print(f"--- Эксперт {assignee}: Задача выполнена, интегрировано {len(verified_claims_for_log)} непротиворечивых утверждений. ---")
-        return verified_claims_for_log
+            print(f"--- Эксперт {assignee}: Задача выполнена, интегрировано {len(verified_claims_for_log)} непротиворечивых утверждений. ---")
+            return verified_claims_for_log
 
     def _decompose_task(self, assignee: str, description: str, goal: str, context: dict) -> dict:
         """Шаг 1: Генерирует поисковые запросы."""
@@ -549,3 +541,70 @@ class ExpertTeam:
         else:
             print(f"!!! Эксперт {assignee}: Не удалось финализировать утверждения.")
             return {}
+        
+    def _execute_financial_task(self, task: dict, world_model: WorldModel):
+        """Генерирует финансовую модель, используя Gemma."""
+        print(f"   [FinancialModelAgent] -> Приступаю к задаче: {task['description']}")
+        
+        arbiter_llm = ChatGoogleGenerativeAI(model="models/gemma-3-27b-it", google_api_key=os.getenv("GOOGLE_API_KEY"), temperature=0.2)
+        
+        # Используем RAG, чтобы дать агенту только релевантные факты
+        relevant_claims = world_model.semantic_index.find_similar_claim_ids(task['description'], top_k=50)
+        kb = world_model.get_full_context()['dynamic_knowledge']['knowledge_base']
+        context_kb = {claim_id: kb[claim_id] for claim_id in relevant_claims if claim_id in kb}
+
+        prompt = f"""**ТВОЯ РОЛЬ:** Финансовый аналитик в стартапе. Ты прагматичен и консервативен.
+**ТВОЯ ЗАДАЧА:** "{task['description']}". На основе предоставленных фактов, создай смету на MVP и реалистичный прогноз прибыли на первый год.
+
+**ФАКТЫ ИЗ БАЗЫ ЗНАНИЙ ДЛЯ АНАЛИЗА:**
+---
+{json.dumps(context_kb, ensure_ascii=False, indent=2)}
+---
+
+**ИНСТРУКЦИИ:**
+1.  **Проанализируй** факты о зарплатах, стоимости API, аренде и т.д.
+2.  **Создай смету затрат на MVP** (6 месяцев разработки). Включи ФОТ, налоги, инфраструктуру.
+3.  **Создай прогноз дохода на 1-й год.** Учитывай модели лицензирования, количество потенциальных клиентов.
+4.  **Сделай вывод** о потенциальной рентабельности.
+5.  **Сформируй результат** в виде ОДНОГО JSON-объекта с заголовком и полной Markdown-строкой, содержащей таблицы и выводы.
+"""
+        report = self._invoke_llm_for_json(arbiter_llm, prompt, FinancialReport)
+        if report and report.get('markdown_content'):
+            filename = "financial_model_mvp.md"
+            world_model.save_artifact(filename, f"# {report['report_title']}\n\n{report['markdown_content']}")
+            world_model.update_task_status(task['task_id'], 'COMPLETED')
+        else:
+            world_model.update_task_status(task['task_id'], 'FAILED')
+
+    def _execute_product_task(self, task: dict, world_model: WorldModel):
+        """Генерирует продуктовый бриф, используя Gemma."""
+        print(f"   [ProductManagerAgent] -> Приступаю к задаче: {task['description']}")
+        
+        arbiter_llm = ChatGoogleGenerativeAI(model="models/gemma-3-27b-it", google_api_key=os.getenv("GOOGLE_API_KEY"), temperature=0.3)
+        
+        relevant_claims = world_model.semantic_index.find_similar_claim_ids(task['description'], top_k=70)
+        kb = world_model.get_full_context()['dynamic_knowledge']['knowledge_base']
+        context_kb = {claim_id: kb[claim_id] for claim_id in relevant_claims if claim_id in kb}
+
+        prompt = f"""**ТВОЯ РОЛЬ:** Опытный Владелец Продукта (Product Owner).
+**ТВОЯ ЗАДАЧА:** "{task['description']}". На основе ВСЕХ имеющихся фактов, создай детальный продуктовый бриф.
+
+**ФАКТЫ ИЗ БАЗЫ ЗНАНИЙ ДЛЯ АНАЛИЗА:**
+---
+{json.dumps(context_kb, ensure_ascii=False, indent=2)}
+---
+
+**ИНСТРУКЦИИ:**
+1.  **Напиши детальное описание** продукта "Карьерный Навигатор", его цели и ключевые функции.
+2.  **Сформулируй список User Stories** для MVP в формате "Как <роль>, я хочу <действие>, чтобы <ценность>".
+3.  **Верни результат** в виде ОДНОГО JSON-объекта.
+"""
+        report = self._invoke_llm_for_json(arbiter_llm, prompt, ProductBrief)
+        if report and report.get('product_description'):
+            filename = "product_brief_mvp.md"
+            content = f"# Описание Продукта: Карьерный Навигатор\n\n{report['product_description']}\n\n## User Stories для MVP\n\n"
+            content += "\n".join([f"- {story}" for story in report['user_stories']])
+            world_model.save_artifact(filename, content)
+            world_model.update_task_status(task['task_id'], 'COMPLETED')
+        else:
+            world_model.update_task_status(task['task_id'], 'FAILED')

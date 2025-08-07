@@ -43,7 +43,8 @@ class WorldModel:
         self.dynamic_knowledge = {
             "strategic_plan": {},
             "knowledge_base": {},
-            "transaction_log": []
+            "transaction_log": [],
+            "generated_artifacts": {}
         }
         
         # --- Новая, отказоустойчивая логика загрузки ---
@@ -92,7 +93,7 @@ class WorldModel:
             self._save_state_to_disk()
         else:
             print(f"!!! [WorldModel] ОШИБКА: Не найдено подходящей фазы для добавления задачи.")
-
+    
     # --- НОВЫЙ ПРИВАТНЫЙ МЕТОД ДЛЯ СОХРАНЕНИЯ ---
     def _save_state_to_disk(self):
         """Сохраняет полный объект dynamic_knowledge в JSON-файл."""
@@ -239,3 +240,19 @@ class WorldModel:
             "static_context": self.static_context,
             "dynamic_knowledge": self.dynamic_knowledge
         }
+    def save_artifact(self, artifact_name: str, artifact_content: str):
+        """Сохраняет сгенерированный артефакт в состояние и на диск."""
+        print(f"   [WorldModel] -> Сохраняю новый артефакт: {artifact_name}")
+        self.dynamic_knowledge['generated_artifacts'][artifact_name] = artifact_content
+        
+        # Сохраняем и в общем файле состояния
+        self._save_state_to_disk()
+        
+        # И как отдельный файл в output для удобства
+        try:
+            artifact_path = os.path.join(self.output_dir, artifact_name)
+            with open(artifact_path, "w", encoding="utf-8") as f:
+                f.write(artifact_content)
+            print(f"   [WorldModel] <- Артефакт также сохранен в файл {artifact_path}")
+        except Exception as e:
+            print(f"!!! ОШИБКА: Не удалось сохранить артефакт в отдельный файл. Ошибка: {e}")
