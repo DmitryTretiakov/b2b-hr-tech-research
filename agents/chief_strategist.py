@@ -73,50 +73,16 @@ class ChiefStrategist:
             # Возвращаем пустой словарь, чтобы система могла обработать сбой
             return {}
         
-    # --- НОВЫЙ ПРИВАТНЫЙ МЕТОД ДЛЯ ПРОВЕРКИ РЕЛЕВАНТНОСТИ ---
-    def _is_claim_commercially_relevant(self, claim: dict) -> bool:
-        """
-        Проверяет одно утверждение на соответствие ключевым бизнес-вопросам.
-        """
-        # Используем самую быструю и дешевую модель для бинарной классификации
-        llm = self.llm 
-        
-        claim_text = f"Утверждение: '{claim['statement']}' (Значение: {claim['value']})"
-        
-        prompt = f"""**КОНТЕКСТ:** Мы готовим бизнес-кейс для создания нового B2B HR-Tech продукта.
-**УТВЕРЖДЕНИЕ ДЛЯ АНАЛИЗА:**
----
-{claim_text}
----
-**БИЗНЕС-ВОПРОСЫ:**
-1.  Помогает ли это утверждение оценить потенциальный **доход, стоимость или ROI**?
-2.  Описывает ли это утверждение значимый **риск** (технический, юридический, рыночный)?
-3.  Раскрывает ли это утверждение уникальное **конкурентное преимущество** или сильную сторону наших активов?
-4.  Указывает ли это утверждение на явную **потребность или "боль"** потенциальных клиентов?
-
-Ответь на вопрос: Помогает ли данное утверждение напрямую ответить **хотя бы на один** из этих четырех бизнес-вопросов?
-"""
-        # Мы используем _invoke_llm_for_json, чтобы получить гарантированный boolean
-        check_result = self._invoke_llm_for_json(prompt, RelevanceCheck)
-        return check_result.get('is_relevant', False)
+    
 
     # --- НОВЫЙ ПРИВАТНЫЙ МЕТОД ДЛЯ ФИЛЬТРАЦИИ БАЗЫ ЗНАНИЙ ---
     def _filter_kb_by_relevance(self, knowledge_base: dict) -> dict:
         """
         Фильтрует всю базу знаний, оставляя только коммерчески релевантные утверждения.
+        Теперь использует пакетную обработку.
         """
-        print("   [Стратег] -> Фильтрую Базу Знаний по коммерческой релевантности...")
-        relevant_kb = {}
-        for claim_id, claim in knowledge_base.items():
-            # Пропускаем проверку для конфликтных утверждений
-            if claim.get('status') == 'CONFLICTED':
-                continue
-            
-            if self._is_claim_commercially_relevant(claim):
-                relevant_kb[claim_id] = claim
-        
-        print(f"   [Стратег] <- Фильтрация завершена. Осталось {len(relevant_kb)} из {len(knowledge_base)} утверждений.")
-        return relevant_kb
+        return self._batch_filter_kb_by_relevance(knowledge_base)
+
 
     def _invoke_llm_for_text(self, prompt: str) -> str:
         """Простой вызов LLM для генерации текста."""
@@ -333,3 +299,45 @@ class ChiefStrategist:
             print(f"      [Валидатор] <- !!! Артефакт НЕ прошел проверку. Причины: {reasons}")
             
         return report
+    
+    def _batch_filter_kb_by_relevance(self, knowledge_base: dict) -> dict:
+        """
+        Фильтрует всю базу знаний одним вызовом LLM, возвращая только коммерчески релевантные утверждения.
+        """
+        print("   [Стратег] -> Запускаю ПАКЕТНУЮ фильтрацию Базы Знаний по коммерческой релевантности...")
+        
+        if not knowledge_base:
+            return {}
+
+        # Формируем текст для анализа, пропуская уже отклоненные
+        claims_for_analysis = []
+        for claim_id, claim in knowledge_base.items():
+            if claim.get('status') != 'CONFLICTED':
+                claims_for_analysis.append(f"ID: {claim_id}, Утверждение: '{claim['statement']}' (Значение: {claim['value']})")
+        
+        claims_text = "\n".join(claims_for_analysis)
+
+        prompt = f"""**КОНТЕКСТ:** Мы готовим бизнес-кейс для создания нового B2B HR-Tech продукта.
+**ТВОЯ ЗАДАЧА:** Проанализируй список утверждений. Определи, какие из них являются **коммерчески релевантными**.
+
+**БИЗНЕС-ВОПРОСЫ ДЛЯ ОЦЕНКИ:**
+1.  Помогает ли утверждение оценить потенциальный **доход, стоимость или ROI**?
+2.  Описывает ли утверждение значимый **риск** (технический, юридический, рыночный)?
+3.  Раскрывает ли утверждение уникальное **конкурентное преимущество** или сильную сторону?
+4.  Указывает ли утверждение на явную **потребность или "боль"** клиентов?
+
+**СПИСОК УТВЕРЖДЕНИЙ ДЛЯ АНАЛИЗА:**
+---
+{claims_text}
+---
+
+**ИНСТРУКЦИЯ:** Верни JSON-объект, содержащий поле `relevant_claim_ids`. Это должен быть список, содержащий ТОЛЬКО ID тех утверждений, которые напрямую помогают ответить **хотя бы на один** из четырех бизнес-вопросов.
+"""
+        
+        report = self._invoke_llm_for_json(prompt, BatchRelevanceReport)
+        
+        relevant_ids = set(report.get('relevant_claim_ids', []))
+        relevant_kb = {claim_id: claim for claim_id, claim in knowledge_base.items() if claim_id in relevant_ids}
+        
+        print(f"   [Стратег] <- Пакетная фильтрация завершена. Осталось {len(relevant_kb)} из {len(knowledge_base)} утверждений.")
+        return relevant_kb
