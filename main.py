@@ -10,9 +10,16 @@ from agents.expert_team import ExpertTeam
 from agents.search_agent import SearchAgent
 from utils.helpers import SearchAPIFailureError # <-- ДОБАВИТЬ ИМПОРТ
 
-# --- НОВЫЕ КОНСТАНТЫ ДЛЯ ПОВТОРНЫХ ПОПЫТОК ---
+# --- КОНСТАНТЫ ДЛЯ УПРАВЛЕНИЯ СКОРОСТЬЮ И ПОПЫТКАМИ ---
 MAX_RETRIES = 3
-RETRY_DELAY_SECONDS = 60 # 1 минута
+# Увеличиваем задержку при ошибке API до 5 минут, чтобы дать сервису "остыть"
+RETRY_DELAY_SECONDS = 300 
+
+# --- НОВЫЕ КОНСТАНТЫ ДЛЯ ДРОССЕЛИРОВАНИЯ ---
+# Задержка после КАЖДОЙ выполненной задачи для снижения общей частоты запросов
+TASK_COOLDOWN_SECONDS = 15 
+# Задержка после ресурсоемкой операции рефлексии у Стратега
+STRATEGIST_COOLDOWN_SECONDS = 30 
 
 def main():
     # --- ИНИЦИАЛИЗАЦИЯ ---
@@ -120,7 +127,8 @@ def main():
             print("\n--- Все задачи текущей фазы выполнены. Запускаю рефлексию Стратега... ---")
             updated_plan = strategist.reflect_and_update_plan(world_model.get_full_context())
             world_model.update_strategic_plan(updated_plan)
-            
+            print(f"   [Оркестратор] Пауза после рефлексии на {STRATEGIST_COOLDOWN_SECONDS} секунд...")
+            time.sleep(STRATEGIST_COOLDOWN_SECONDS)
             if updated_plan.get("main_goal_status") == "READY_FOR_FINAL_BRIEF":
                 print("--- Стратег решил, что информации достаточно. Переходим к написанию финального отчета. ---")
                 break
@@ -165,6 +173,8 @@ def main():
             print(f"!!! ОРКЕСТРАТОР: Произошла НЕПРЕДВИДЕННАЯ критическая ошибка при выполнении задачи {task_id}. Задача провалена. Ошибка: {e}")
             world_model.update_task_status(task_id, 'FAILED')
             world_model.log_transaction({'task': task_to_run, 'results': f"UNHANDLED CRITICAL ERROR: {e}"})
+        print(f"   [Оркестратор] Пауза после задачи на {TASK_COOLDOWN_SECONDS} секунд...")
+        time.sleep(TASK_COOLDOWN_SECONDS)
 
     # --- ФИНАЛЬНЫЙ ОТЧЕТ ---
     print("\n--- Создание финальных отчетов... ---")
