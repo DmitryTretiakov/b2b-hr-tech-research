@@ -18,10 +18,17 @@ def robust_hybrid_search(query: str, num_results: int = 10) -> dict:
     # --- Попытка №1: Основной API (Serper) с использованием requests ---
     serper_api_key = os.getenv("SERPER_API_KEY") # Убедитесь, что имя в .env совпадает!
 
-    # --- ИЗМЕНЕНИЕ: ЯВНАЯ ПРОВЕРКА КЛЮЧА С ЛОГИРОВАНИЕМ ---
-    if not serper_api_key:
-        print("   [Поиск Serper] !!! Внимание: Ключ SERPER_API_KEY не найден в .env. Serper будет пропущен.")
+    # --- ДИАГНОСТИКА: ПРОВЕРКА КЛЮЧА ВНУТРИ ФУНКЦИИ ---
+    print(f"\n--- ДИАГНОСТИКА ВНУТРИ robust_hybrid_search ---")
+    print(f"   Запрос: '{query}'")
+    if serper_api_key:
+        print(f"   [OK] Ключ SERPER_API_KEY доступен внутри функции.")
     else:
+        print("   [!!! ОШИБКА] Ключ SERPER_API_KEY НЕ доступен внутри функции (равен None).")
+    print("------------------------------------------\n")
+    # --- КОНЕЦ ДИАГНОСТИКИ ---
+    
+    if serper_api_key:
         print(f"    -> [Поиск Serper] Выполняю POST-запрос: '{query}'...")
         url = "https://google.serper.dev/search"
         payload = json.dumps({"q": query, "num": num_results, "gl": "ru", "hl": "ru"})

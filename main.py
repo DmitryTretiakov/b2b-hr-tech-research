@@ -33,6 +33,23 @@ def main():
     load_dotenv()
     print("Инициализация системы 'Автономный Проектный Офис'...")
     
+    # --- ДИАГНОСТИКА: ПРОВЕРКА ЗАГРУЗКИ КЛЮЧЕЙ ---
+    print("\n--- ДИАГНОСТИКА API КЛЮЧЕЙ ---")
+    serper_key = os.getenv("SERPER_API_KEY")
+    google_key = os.getenv("GOOGLE_SEARCH_API_KEY")
+    
+    if serper_key:
+        print(f"   [OK] SERPER_API_KEY загружен. Длина: {len(serper_key)}, Первые 4 символа: {serper_key[:4]}")
+    else:
+        print("   [!!! ОШИБКА] SERPER_API_KEY НЕ найден!")
+        
+    if google_key:
+        print(f"   [OK] GOOGLE_SEARCH_API_KEY загружен.")
+    else:
+        print("   [!!! ВНИМАНИЕ] GOOGLE_SEARCH_API_KEY НЕ найден.")
+    print("---------------------------------\n")
+    # --- КОНЕЦ ДИАГНОСТИКИ ---
+    
     # ИНИЦИАЛИЗАЦИЯ LLM С ТОНКОЙ НАСТРОЙКОЙ ТЕМПЕРАТУРЫ
     try:
         llms = {
