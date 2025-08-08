@@ -98,46 +98,10 @@ SOURCE_TRUST_MULTIPLIERS = {
 }
 
 class ExpertTeam:
-    def _get_llm_for_task(self, task_type: str) -> ChatGoogleGenerativeAI:
-        """Единый диспетчер моделей для разных типов задач."""
-        if task_type == 'NLI':
-            flash_model_name = "models/gemini-2.5-flash"
-            if self.budget_manager.can_i_spend(flash_model_name):
-                print(f"   [Диспетчер NLI] Использую основную модель: {flash_model_name}")
-                return self.llms["expert_flash"]
-
-            gemma_model_name = "models/gemma-3-27b-it"
-            print(f"!!! ВНИМАНИЕ: [Диспетчер NLI] Бюджет для {flash_model_name} исчерпан. Переключаюсь на резерв {gemma_model_name}.")
-            if self.budget_manager.can_i_spend(gemma_model_name):
-                return self.llms["source_auditor"]
-
-            raise ResourceExhausted("All models suitable for NLI have reached their daily budget limit.")
-        elif task_type == 'AUDIT':
-            flash_model_name = "models/gemini-2.5-flash"
-            if self.budget_manager.can_i_spend(flash_model_name):
-                return self.llms["expert_flash"]
-            gemma_model_name = "models/gemma-3-27b-it"
-            if self.budget_manager.can_i_spend(gemma_model_name):
-                return self.llms["source_auditor"]
-            raise ResourceExhausted("All models for AUDIT have reached their daily budget limit.")
-        elif task_type == 'ROUTINE':
-            lite_model_name = "models/gemini-2.5-flash-lite"
-            if self.budget_manager.can_i_spend(lite_model_name):
-                return self.llms["expert_lite"]
-            flash_model_name = "models/gemini-2.5-flash"
-            if self.budget_manager.can_i_spend(flash_model_name):
-                return self.llms["expert_flash"]
-            gemma_model_name = "models/gemma-3-27b-it"
-            if self.budget_manager.can_i_spend(gemma_model_name):
-                return self.llms["source_auditor"]
-            raise ResourceExhausted("All models for ROUTINE have reached their daily budget limit.")
-        elif task_type == 'SPECIALIST':
-            gemma_model_name = "models/gemma-3-27b-it"
-            if self.budget_manager.can_i_spend(gemma_model_name):
-                return self.llms["source_auditor"]
-            raise ResourceExhausted("All models for SPECIALIST have reached their daily budget limit.")
-        else:
-            raise ValueError(f"Unknown task type: {task_type}")
+    """
+    Управляет командой экспертов. Получает задачу и ОБЩИЙ КОНТЕКСТ,
+    проводит исследование, аудит и возвращает список верифицированных "Утверждений".
+    """
     def __init__(self, llms: dict, search_agent: SearchAgent, budget_manager: APIBudgetManager):
         self.llms = llms
         self.search_agent = search_agent
@@ -243,6 +207,47 @@ class ExpertTeam:
 
         print("   [Арбитр] <- Конфликт успешно разрешен.")
         world_model.update_task_status(task['task_id'], 'COMPLETED')
+
+    def _get_llm_for_task(self, task_type: str) -> ChatGoogleGenerativeAI:
+        """Единый диспетчер моделей для разных типов задач."""
+        if task_type == 'NLI':
+            flash_model_name = "models/gemini-2.5-flash"
+            if self.budget_manager.can_i_spend(flash_model_name):
+                print(f"   [Диспетчер NLI] Использую основную модель: {flash_model_name}")
+                return self.llms["expert_flash"]
+
+            gemma_model_name = "models/gemma-3-27b-it"
+            print(f"!!! ВНИМАНИЕ: [Диспетчер NLI] Бюджет для {flash_model_name} исчерпан. Переключаюсь на резерв {gemma_model_name}.")
+            if self.budget_manager.can_i_spend(gemma_model_name):
+                return self.llms["source_auditor"]
+
+            raise ResourceExhausted("All models suitable for NLI have reached their daily budget limit.")
+        elif task_type == 'AUDIT':
+            flash_model_name = "models/gemini-2.5-flash"
+            if self.budget_manager.can_i_spend(flash_model_name):
+                return self.llms["expert_flash"]
+            gemma_model_name = "models/gemma-3-27b-it"
+            if self.budget_manager.can_i_spend(gemma_model_name):
+                return self.llms["source_auditor"]
+            raise ResourceExhausted("All models for AUDIT have reached their daily budget limit.")
+        elif task_type == 'ROUTINE':
+            lite_model_name = "models/gemini-2.5-flash-lite"
+            if self.budget_manager.can_i_spend(lite_model_name):
+                return self.llms["expert_lite"]
+            flash_model_name = "models/gemini-2.5-flash"
+            if self.budget_manager.can_i_spend(flash_model_name):
+                return self.llms["expert_flash"]
+            gemma_model_name = "models/gemma-3-27b-it"
+            if self.budget_manager.can_i_spend(gemma_model_name):
+                return self.llms["source_auditor"]
+            raise ResourceExhausted("All models for ROUTINE have reached their daily budget limit.")
+        elif task_type == 'SPECIALIST':
+            gemma_model_name = "models/gemma-3-27b-it"
+            if self.budget_manager.can_i_spend(gemma_model_name):
+                return self.llms["source_auditor"]
+            raise ResourceExhausted("All models for SPECIALIST have reached their daily budget limit.")
+        else:
+            raise ValueError(f"Unknown task type: {task_type}")
 
     def _batch_audit_sources(self, urls: List[str]) -> Dict[str, dict]:
         """
