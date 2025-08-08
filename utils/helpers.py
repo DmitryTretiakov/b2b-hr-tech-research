@@ -11,6 +11,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel
 from google.api_core.exceptions import ResourceExhausted
 from core.budget_manager import APIBudgetManager
+from pydantic import ValidationError
 
 # --- НОВОЕ КАСТОМНОЕ ИСКЛЮЧЕНИЕ ---
 class SearchAPIFailureError(Exception):
@@ -278,6 +279,8 @@ def invoke_llm_for_json_with_retry(
     
     last_error = None
     raw_output = ""
+    # --- НОВАЯ ПЕРЕМЕННАЯ ДЛЯ УМНОЙ ОБРАТНОЙ СВЯЗИ ---
+    detailed_feedback = ""
 
     for attempt in range(max_retries):
         print(f"      [JSON Invoker] Попытка {attempt + 1}/{max_retries}...")
@@ -285,29 +288,28 @@ def invoke_llm_for_json_with_retry(
         current_prompt = prompt_with_instructions
         current_llm = main_llm
 
-        model_name = current_llm.model
-        if not budget_manager.can_i_spend(model_name):
-            print(f"!!! [Бюджет] ДНЕВНОЙ ЛИМИТ для {model_name} исчерпан. Попытка отменена.")
-            last_error = ResourceExhausted(f"Daily budget limit for {model_name} reached.")
-            continue # Переходим к следующей попытке (которая может использовать другую модель)
-
-        if attempt == 1: # Вторая попытка: просим основную модель исправить свой же вывод
-            print("      [JSON Invoker] Стратегия 2: Прошу основную модель исправить свой невалидный JSON.")
-            current_prompt = f"""Твой предыдущий ответ не удалось распарсить. Он вернул ошибку: {last_error}.
-Пожалуйста, верни ТОЛЬКО валидный JSON, который соответствует запрошенной схеме.
-
-Вот твой предыдущий, невалидный ответ:
+        # --- ШАГ 4: Внедряем "умную" обратную связь в промпт ---
+        if attempt > 0:
+            # Стратегия 2: Просим основную модель исправить свой же вывод с детальной обратной связью
+            if attempt == 1:
+                print("      [JSON Invoker] Стратегия 2: Прошу основную модель исправить свой невалидный JSON с детальной обратной связью.")
+                current_prompt = f"""Твой предыдущий ответ не удалось распарсить. Обнаружены следующие КОНКРЕТНЫЕ ошибки валидации:
+---
+{detailed_feedback}
+---
+Вот твой предыдущий, невалидный ответ целиком:
 ---
 {raw_output}
 ---
-
-Вот оригинальные инструкции по формату:
+Пожалуйста, внимательно изучи ошибки, исправь свой JSON и верни ТОЛЬКО валидный JSON, который соответствует оригинальной схеме.
+Оригинальные инструкции по формату:
 {parser.get_format_instructions()}
 """
-        elif attempt == 2: # Третья попытка: используем "санитарную" модель для извлечения JSON
-            print("      [JSON Invoker] Стратегия 3: Использую 'санитарную' модель для извлечения JSON из вывода.")
-            current_llm = sanitizer_llm
-            current_prompt = f"""Извлеки валидный JSON объект из текста ниже. Верни ТОЛЬКО сам JSON и ничего больше.
+            # Стратегия 3: Используем "санитарную" модель для извлечения JSON
+            elif attempt == 2:
+                print("      [JSON Invoker] Стратегия 3: Использую 'санитарную' модель для извлечения JSON из вывода.")
+                current_llm = sanitizer_llm
+                current_prompt = f"""Извлеки валидный JSON объект из текста ниже. Верни ТОЛЬКО сам JSON и ничего больше.
 
 ТЕКСТ ДЛЯ АНАЛИЗА:
 ---
@@ -317,24 +319,44 @@ def invoke_llm_for_json_with_retry(
 Вот оригинальные инструкции по формату, которым должен соответствовать JSON:
 {parser.get_format_instructions()}
 """
+        
+        model_name = current_llm.model
+        if not budget_manager.can_i_spend(model_name):
+            print(f"!!! [Бюджет] ДНЕВНОЙ ЛИМИТ для {model_name} исчерпан. Попытка отменена.")
+            last_error = ResourceExhausted(f"Daily budget limit for {model_name} reached.")
+            continue
+
         try:
             response = current_llm.invoke(current_prompt)
-            raw_output = response.content # Сохраняем сырой вывод для возможных исправлений
+            raw_output = response.content
             budget_manager.record_spend(model_name)
             parsed_object = parser.parse(raw_output)
             print("      [JSON Invoker] <- Ответ LLM успешно получен и распарсен.")
             return parsed_object.model_dump()
-        except Exception as e:
-            if isinstance(e, ResourceExhausted):
-                 budget_manager.record_spend(model_name) # Записываем даже неудачную попытку, т.к. она была сделана
+        
+        # --- ШАГ 2: Перехватываем КОНКРЕТНУЮ ошибку валидации ---
+        except ValidationError as e:
             last_error = e
+            # --- ШАГ 3: Формируем детальную обратную связь ---
+            error_messages = [f"- Поле `{' -> '.join(map(str, err['loc']))}`: {err['msg']}" for err in e.errors()]
+            detailed_feedback = "\n".join(error_messages)
+            print(f"      [JSON Invoker] !!! Ошибка валидации Pydantic. Детали:\n{detailed_feedback}")
+            if isinstance(e, ResourceExhausted):
+                 budget_manager.record_spend(model_name)
+            time.sleep(3)
+
+        except Exception as e:
+            last_error = e
+            detailed_feedback = f"Произошла общая ошибка: {str(e)}" # Для других типов ошибок
             print(f"      [JSON Invoker] !!! Ошибка на попытке {attempt + 1}: {e}")
-            time.sleep(3) # Небольшая пауза перед следующей попыткой
+            if isinstance(e, ResourceExhausted):
+                 budget_manager.record_spend(model_name)
+            time.sleep(3)
 
     print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось получить валидный JSON после {max_retries} попыток.")
     if isinstance(last_error, ResourceExhausted):
         raise last_error
-    return {} # Возвращаем пустой словарь в случае полного провала
+    return {}
 
 def read_system_logs(log_dir: str, last_n_files: int = 5) -> str:
     """Читает последние N файлов логов из директории и возвращает их содержимое."""
