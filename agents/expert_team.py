@@ -11,7 +11,7 @@ from agents.search_agent import SearchAgent
 from utils.helpers import format_search_results_for_llm
 from google.api_core.exceptions import ResourceExhausted
 from core.world_model import WorldModel
-from utils.helpers import invoke_llm_for_json_with_retry, read_system_logs
+from utils.helpers import invoke_llm_for_json_with_retry, read_system_logs, validate_artifact_citations
 from core.budget_manager import APIBudgetManager
 
 # --- PYDANTIC СХЕМЫ ДЛЯ ЭКСПЕРТНОЙ КОМАНДЫ ---
@@ -517,6 +517,14 @@ class ExpertTeam:
 
     def _decompose_task(self, assignee: str, description: str, goal: str, context: dict) -> dict:
         """Шаг 1: Генерирует поисковые запросы."""
+
+
+        role_prompt_addition = ""
+        if assignee == 'Contrarian_Expert':
+            role_prompt_addition = """
+**ОСОБАЯ ИНСТРУКЦИЯ:** Ты "Адвокат Дьявола". Твоя цель — не подтвердить, а ОПРОВЕРГНУТЬ. Твои поисковые запросы должны быть сформулированы так, чтобы найти критику, негативные отзывы, провальные кейсы и альтернативные мнения. Например, вместо "преимущества X" ищи "недостатки X", "проблемы с X", "провал проекта X".
+"""
+
         print(f"   [Эксперт {assignee}] Шаг 1/5: Генерирую поисковые запросы...")
         prompt = f"""**ОБЩАЯ МИССИЯ ПРОЕКТА:**
 {context['static_context']['main_goal']}
@@ -524,6 +532,7 @@ class ExpertTeam:
 Ты - ассистент-исследователь для эксперта '{assignee}'.
 Цель твоего эксперта: {goal}
 Текущая задача эксперта: {description}
+{role_prompt_addition}
 **ТВОЯ ЗАДАЧА:**
 Сгенерируй от 4 до 6 максимально конкретных и разнообразных поисковых запросов на русском языке, которые помогут эксперту найти ДОКАЗАТЕЛЬСТВА и ФАКТЫ для выполнения его задачи.
 Ты ОБЯЗАН вернуть результат в формате JSON, соответствующем предоставленной схеме."""
@@ -684,12 +693,19 @@ class ExpertTeam:
         )
         
         # --- Проверка результата ПОСЛЕ цикла ---
-        if report:
-            filename = "financial_model_mvp.md"
-            world_model.save_artifact(filename, f"# {report['report_title']}\n\n{report['markdown_content']}")
-            world_model.update_task_status(task['task_id'], 'COMPLETED')
+        if report and 'markdown_content' in report:
+            kb = world_model.get_full_context()['dynamic_knowledge']['knowledge_base']
+            validation_result = validate_artifact_citations(report['markdown_content'], kb)
+            
+            if validation_result["is_valid"]:
+                filename = "financial_model_mvp.md"
+                world_model.save_artifact(filename, f"# {report['report_title']}\n\n{report['markdown_content']}")
+                world_model.update_task_status(task['task_id'], 'COMPLETED')
+            else:
+                print(f"   [FinancialModelAgent] !!! Артефакт не прошел аудит цитат. Причина: {validation_result['reason']}")
+                world_model.update_task_status(task['task_id'], 'FAILED')
         else:
-            print(f"   [FinancialModelAgent] !!! Не удалось сгенерировать отчет после 3 попыток.")
+            print(f"   [FinancialModelAgent] !!! Не удалось сгенерировать отчет после нескольких попыток.")
             world_model.update_task_status(task['task_id'], 'FAILED')
 
     def _execute_product_task(self, task: dict, world_model: WorldModel):
@@ -726,14 +742,25 @@ class ExpertTeam:
         )
 
         # --- Проверка результата ПОСЛЕ цикла ---
-        if report:
-            filename = "product_brief_mvp.md"
-            content = f"# Описание Продукта: Карьерный Навигатор\n\n{report['product_description']}\n\n## User Stories для MVP\n\n"
-            content += "\n".join([f"- {story}" for story in report['user_stories']])
-            world_model.save_artifact(filename, content)
-            world_model.update_task_status(task['task_id'], 'COMPLETED')
+        if report and 'product_description' in report and 'user_stories' in report:
+            # Собираем весь текст для проверки
+            full_content = f"# Описание\n{report['product_description']}\n\n# User Stories\n"
+            full_content += "\n".join(report['user_stories'])
+
+            kb = world_model.get_full_context()['dynamic_knowledge']['knowledge_base']
+            validation_result = validate_artifact_citations(full_content, kb)
+
+            if validation_result["is_valid"]:
+                filename = "product_brief_mvp.md"
+                content = f"# Описание Продукта: Карьерный Навигатор\n\n{report['product_description']}\n\n## User Stories для MVP\n\n"
+                content += "\n".join([f"- {story}" for story in report['user_stories']])
+                world_model.save_artifact(filename, content)
+                world_model.update_task_status(task['task_id'], 'COMPLETED')
+            else:
+                print(f"   [ProductManagerAgent] !!! Артефакт не прошел аудит цитат. Причина: {validation_result['reason']}")
+                world_model.update_task_status(task['task_id'], 'FAILED')
         else:
-            print(f"   [ProductManagerAgent] !!! Не удалось сгенерировать отчет после 3 попыток.")
+            print(f"   [ProductManagerAgent] !!! Не удалось сгенерировать отчет после нескольких попыток.")
             world_model.update_task_status(task['task_id'], 'FAILED')
     
     def _get_llm_for_nli(self) -> ChatGoogleGenerativeAI:

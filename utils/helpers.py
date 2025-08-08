@@ -354,3 +354,34 @@ def read_system_logs(log_dir: str, last_n_files: int = 5) -> str:
         return "\n".join(content) if content else "Логи не найдены."
     except Exception as e:
         return f"Ошибка при чтении логов: {e}"
+    
+def validate_artifact_citations(artifact_content: str, knowledge_base: dict) -> dict:
+    """
+    Проверяет, что все цитаты [Утверждение: id] в тексте существуют в Базе Знаний.
+    Это детерминированный, не-AI аудитор.
+    """
+    print("      [Citation Auditor] -> Провожу аудит цитат в сгенерированном артефакте...")
+    
+    # Находим все уникальные ID, на которые ссылается артефакт
+    found_citations = set(re.findall(r'\[Утверждение: ([\w_,-]+)\]', artifact_content))
+    
+    if not found_citations:
+        reason = "Критический провал: Артефакт не содержит ни одной цитаты [Утверждение: id], что делает его недоказуемым."
+        print(f"      [Citation Auditor] <- !!! {reason}")
+        return {"is_valid": False, "reason": reason}
+
+    invalid_citations = []
+    for citation_id in found_citations:
+        if citation_id not in knowledge_base:
+            invalid_citations.append(citation_id)
+
+    if invalid_citations:
+        reason = f"Найдены ссылки на несуществующие или устаревшие факты: {', '.join(invalid_citations)}"
+        print(f"      [Citation Auditor] <- !!! {reason}")
+        return {
+            "is_valid": False,
+            "reason": reason
+        }
+    
+    print(f"      [Citation Auditor] <- Аудит успешен. Все {len(found_citations)} цитат корректны.")
+    return {"is_valid": True, "reason": "Все цитаты корректны."}

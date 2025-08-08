@@ -380,6 +380,16 @@ def main():
         with open(brief_file_path, "w", encoding="utf-8") as f:
             f.write(f"# ГЕНЕРАЦИЯ ПРОВАЛЕНА\n\nНе удалось создать качественный документ после {MAX_VALIDATION_RETRIES} попыток.\n\nПоследняя ошибка: {brief_content}")
         print(f"!!! ОШИБКА: Не удалось сгенерировать Extended Brief. Отчет об ошибке сохранен в {brief_file_path}")
+
+    
+    # --- НАЧАЛО: ГЕНЕРАЦИЯ "ЕДИНОГО ИСТОЧНИКА ПРАВДЫ" ---
+    print("\n--- Создание финального аудиторского отчета по Базе Знаний... ---")
+    kb_report_content = strategist.generate_knowledge_base_report(world_model)
+    kb_report_path = os.path.join(world_model.output_dir, "Knowledge_Base_Audit_Report.md")
+    with open(kb_report_path, "w", encoding="utf-8") as f:
+        f.write(kb_report_content)
+    print(f"-> Полный отчет по Базе Знаний сохранен в {kb_report_path}")
+    # --- КОНЕЦ ---
         
     print(f"\n--- РАБОТА УСПЕШНО ЗАВЕРШЕНА ---")
 
