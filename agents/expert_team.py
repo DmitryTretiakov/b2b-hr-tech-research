@@ -9,7 +9,7 @@ from langchain.output_parsers import PydanticOutputParser
 from langchain_google_genai import ChatGoogleGenerativeAI
 from agents.search_agent import SearchAgent
 from utils.helpers import format_search_results_for_llm
-
+from google.api_core.exceptions import ResourceExhausted
 from core.world_model import WorldModel
 from utils.helpers import invoke_llm_for_json_with_retry
 from core.budget_manager import APIBudgetManager
@@ -109,8 +109,27 @@ class ExpertTeam:
         print("-> Команда Экспертов сформирована и использует Pydantic-парсеры.")
 
     def _get_llm_for_expert(self, assignee: str) -> ChatGoogleGenerativeAI:
-        """Выбирает модель в зависимости от роли эксперта."""
-        return self.llms.get("expert_flash", self.llms["expert_lite"])
+        """Выбирает модель для рутинных экспертных задач по каскадному принципу."""
+        
+        # Эшелон 1: Рабочие лошадки
+        lite_model_name = "models/gemini-2.5-flash-lite"
+        if self.budget_manager.can_i_spend(lite_model_name):
+            return self.llms.get("expert_lite")
+
+        flash_model_name = "models/gemini-2.5-flash"
+        if self.budget_manager.can_i_spend(flash_model_name):
+            print(f"   [Диспетчер] Лимит для {lite_model_name} исчерпан. Использую {flash_model_name}.")
+            return self.llms.get("expert_flash")
+
+        # Эшелон 2: Резерв
+        gemma_model_name = "models/gemma-3-27b-it"
+        print(f"!!! [Диспетчер] Лимиты для всех Flash-моделей исчерпаны. Переключаюсь на резерв: {gemma_model_name}.")
+        if self.budget_manager.can_i_spend(gemma_model_name):
+            return self.llms.get("source_auditor") # Ваша модель Gemma
+
+        # Полный провал
+        print("!!! КРИТИЧЕСКИЙ СБОЙ: Все рабочие и резервные модели исчерпали лимит.")
+        raise ResourceExhausted("All expert models have reached their daily budget limit.")
 
     def _execute_arbitration_task(self, task: dict, world_model: WorldModel) -> None:
         """
@@ -664,16 +683,17 @@ class ExpertTeam:
         Приоритет: Flash -> Gemma.
         """
         # Приоритет 1: Мощная модель, если есть бюджет
-        flash_model_name = "models/gemini-2.5-flash"
-        if self.budget_manager.can_i_spend(flash_model_name):
+        gemma_model_name = "models/gemma-3-27b-it"
+        
+        if self.budget_manager.can_i_spend(gemma_model_name):
             print("   [NLI Диспетчер] Использую Gemini Flash для NLI.")
             return self.llms["source_auditor"]
 
-        # Приоритет 2: Резервная модель Gemma
-        gemma_model_name = "models/gemma-3-27b-it"
-        print(f"!!! [NLI Диспетчер] Бюджет для {flash_model_name} исчерпан. Переключаюсь на {gemma_model_name} для NLI.")
-        if self.budget_manager.can_i_spend(gemma_model_name):
-            return self.llms["source_auditor"] # Ваша модель Gemma
+        # Приоритет 2: Резервная модель flash-lite
+        flash_lite_model_name = "models/gemini-2.5-flash-lite"
+        print(f"!!! [NLI Диспетчер] Бюджет для {flash_lite_model_name} исчерпан. Переключаюсь на {flash_lite_model_name} для NLI.")
+        if self.budget_manager.can_i_spend(flash_lite_model_name):
+            return self.llms["source_auditor"] 
 
         # Полный провал
         print("!!! КРИТИЧЕСКИЙ СБОЙ NLI: Все подходящие модели исчерпали дневной лимит.")
