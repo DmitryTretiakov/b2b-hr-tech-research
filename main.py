@@ -179,6 +179,13 @@ def main():
     if not world_model.get_full_context()['dynamic_knowledge']['strategic_plan']:
         print("\n--- Стратегический план не найден. Создаю новый... ---")
         plan = strategist.create_strategic_plan(world_model.get_full_context())
+        
+        # --- НАЧАЛО ИСПРАВЛЕНИЯ: АКТИВАЦИЯ ПЕРВОЙ ФАЗЫ ---
+        if plan and plan.get("phases"):
+            print("--- Активирую первую фазу плана... ---")
+            plan["phases"][0]["status"] = "IN_PROGRESS"
+        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
         world_model.update_strategic_plan(plan)
     else:
         print("\n--- Обнаружен существующий стратегический план. Продолжаю работу... ---")
@@ -286,9 +293,9 @@ def main():
             draft_summary = strategist.write_executive_summary(world_model, feedback=feedback)
             # Валидируем черновик
             validation_report = strategist.validate_artifact(
-                llms['expert_flash'],
-                draft_summary,
-                required_sections=["Executive Summary", "Концепция Продукта", "Дорожная Карта"]
+            llms['source_auditor'], # <-- ИСПОЛЬЗУЕМ ДЕШЕВУЮ И ДОСТУПНУЮ МОДЕЛЬ
+            draft_summary,
+            required_sections=["Executive Summary", "Концепция Продукта", "Дорожная Карта"]
             )
             if validation_report.get("is_valid"):
                 summary_content = draft_summary
@@ -321,7 +328,7 @@ def main():
             feedback = brief_content
             draft_brief = strategist.write_extended_brief(world_model, feedback=feedback)
             validation_report = strategist.validate_artifact(
-                llms['expert_flash'],
+                llms['source_auditor'], # <-- ИСПОЛЬЗУЕМ ДЕШЕВУЮ И ДОСТУПНУЮ МОДЕЛЬ
                 draft_brief,
                 required_sections=["Анализ Активов ТГУ", "Конкурентный Ландшафт", "Бизнес-Кейс"]
             )

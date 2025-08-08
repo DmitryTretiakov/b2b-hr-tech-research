@@ -11,7 +11,7 @@ from agents.search_agent import SearchAgent
 from utils.helpers import format_search_results_for_llm
 from google.api_core.exceptions import ResourceExhausted
 from core.world_model import WorldModel
-from utils.helpers import invoke_llm_for_json_with_retry
+from utils.helpers import invoke_llm_for_json_with_retry, read_system_logs
 from core.budget_manager import APIBudgetManager
 
 # --- PYDANTIC СХЕМЫ ДЛЯ ЭКСПЕРТНОЙ КОМАНДЫ ---
@@ -214,9 +214,11 @@ class ExpertTeam:
         """
         if task_type == 'NLI':
             flash_lite_model_name = "models/gemini-2.5-flash-lite"
-            if self.budget_manager.can_i_spend(flash_model_name):
+            # --- НАЧАЛО ИСПРАВЛЕНИЯ ---
+            if self.budget_manager.can_i_spend(flash_lite_model_name): # БЫЛО: flash_model_name
                 print(f"   [Диспетчер NLI] Использую основную модель: {flash_lite_model_name}")
                 return self.llms["expert_lite"]
+            # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
             gemma_model_name = "models/gemma-3-27b-it"
             print(f"!!! ВНИМАНИЕ: [Диспетчер NLI] Бюджет для {flash_model_name} исчерпан. Переключаюсь на резерв {gemma_model_name}.")
@@ -371,6 +373,45 @@ class ExpertTeam:
         elif assignee == 'ProductManagerAgent':
             self._execute_product_task(task, world_model)
             return []
+            
+        elif assignee == 'System_Diagnostician':
+            print(f"\n--- System Diagnostician: Анализирую логи системы ---")
+            system_logs = read_system_logs(world_model.log_dir)
+            
+            prompt = f"""Проанализируй системные логи и определи любые аномалии, сбои или возможные проблемы.
+Обрати особое внимание на паттерны ошибок, частоту сбоев и общую производительность системы.
+
+СИСТЕМНЫЕ ЛОГИ:
+{system_logs}
+
+ЗАДАЧА:
+{description}
+
+ЦЕЛЬ:
+{goal}
+
+На основе этих данных создай список конкретных утверждений (claims) о состоянии системы."""
+            
+            try:
+                claims = invoke_llm_for_json_with_retry(
+                    main_llm=self.llms['expert_flash'],
+                    sanitizer_llm=self.llms['source_auditor'],
+                    prompt=prompt,
+                    pydantic_schema=ClaimList,
+                    budget_manager=self.budget_manager
+                )
+                
+                if claims and 'claims' in claims:
+                    for claim in claims['claims']:
+                        claim['source_type'] = 'OFFICIAL_DOCS'  # Логи - официальный источник
+                        claim['source_trust'] = 1.0  # Максимальное доверие к системным логам
+                        claim['confidence_score'] = 1.0  # Максимальная уверенность для системных данных
+                    return claims['claims']
+                return []
+            
+            except Exception as e:
+                print(f"!!! Ошибка при анализе системных логов: {e}")
+                return []
         
         # --- 3. Стандартный конвейер для агентов-исследователей ---
         else:
@@ -384,9 +425,6 @@ class ExpertTeam:
             # Шаг 2: Поиск и форматирование результатов
             raw_results = [self.search_agent.search(q) for q in search_queries]
             search_results_str = "\n".join([format_search_results_for_llm(r) for r in raw_results])
-            if not search_results_str.strip() or "Поиск не дал результатов" in search_results_str:
-                print(f"!!! Эксперт {assignee}: Поиск не дал результатов.")
-                return []
 
             # Шаг 3: Написание черновика "Утверждений"
             draft_claims_dict = self._create_draft_claims(assignee, description, goal, search_results_str, world_model_context)
@@ -412,7 +450,9 @@ class ExpertTeam:
             # Шаг 4: Аудит содержимого
             vulnerabilities_dict = self._audit_claims(enriched_claims, world_model_context)
             vulnerabilities = vulnerabilities_dict.get('vulnerabilities', {})
-            
+            if not vulnerabilities:
+                print(f"!!! Эксперт {assignee}: Аудит не вернул результатов. Прерываю обработку задачи во избежание передачи невалидированных данных.")
+                return [] # Возвращаем пустой список, задача считается выполненной, но безрезультатно
             # Шаг 5: Финализация
             final_claims_dict = self._finalize_claims(assignee, description, search_results_str, enriched_claims, vulnerabilities, world_model_context)
             final_claims = final_claims_dict.get('claims', [])
@@ -514,6 +554,7 @@ class ExpertTeam:
 Твоя текущая задача - проанализировать результаты поиска по теме '{description}' и сформулировать несколько ключевых "Утверждений" (Claims).
 Каждое утверждение должно быть максимально конкретным, основанным на данных и РЕЛЕВАНТНЫМ для ОБЩЕЙ МИССИИ ПРОЕКТА.
 **ПРАВИЛА:**
+- Сгенерируй НЕ БОЛЕЕ 7-10 самых важных и уникальных утверждений. Сосредоточься на качестве, а не на количестве.
 - Статус каждого утверждения должен быть 'UNVERIFIED'.
 - Ты ОБЯЗАН вернуть результат в формате JSON, соответствующем предоставленной схеме.
 **РЕЗУЛЬТАТЫ ПОИСКА ДЛЯ АНАЛИЗА:**

@@ -35,8 +35,10 @@ class WorldModel:
         os.makedirs(self.cache_dir, exist_ok=True)
 
         # --- ИСПРАВЛЕННАЯ И ЕДИНСТВЕННАЯ ИНИЦИАЛИЗАЦИЯ ИНДЕКСА ---
-        # 1. Сначала инициализируем модель для эмбеддингов
-        embedding_model = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
+        embedding_model = GoogleGenerativeAIEmbeddings(
+            model="models/gemini-embedding-001",
+            output_dimensionality=768  # <-- ЯВНОЕ УКАЗАНИЕ РЕКОМЕНДОВАННОЙ РАЗМЕРНОСТИ
+        )
         
         # 2. Затем создаем SemanticIndex, ПЕРЕДАВАЯ ему budget_manager
         self.semantic_index = SemanticIndex(

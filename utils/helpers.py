@@ -335,3 +335,22 @@ def invoke_llm_for_json_with_retry(
     if isinstance(last_error, ResourceExhausted):
         raise last_error
     return {} # Возвращаем пустой словарь в случае полного провала
+
+def read_system_logs(log_dir: str, last_n_files: int = 5) -> str:
+    """Читает последние N файлов логов из директории и возвращает их содержимое."""
+    try:
+        log_files = sorted(
+            [os.path.join(log_dir, f) for f in os.listdir(log_dir) if f.endswith('.json')],
+            key=os.path.getmtime,
+            reverse=True
+        )
+        
+        content = []
+        for log_file in log_files[:last_n_files]:
+            with open(log_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                content.append(f"--- LOG FILE: {os.path.basename(log_file)} ---\n{json.dumps(data, ensure_ascii=False, indent=2)}\n")
+        
+        return "\n".join(content) if content else "Логи не найдены."
+    except Exception as e:
+        return f"Ошибка при чтении логов: {e}"
