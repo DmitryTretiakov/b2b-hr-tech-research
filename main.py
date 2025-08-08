@@ -87,6 +87,20 @@ def main():
     except Exception as e:
         print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать модели LLM. Проверьте GOOGLE_API_KEY. Ошибка: {e}")
         return
+    
+    daily_limits = {
+        "models/gemini-2.5-pro": 100,
+        "models/gemini-2.5-flash": 250,
+        "models/gemini-2.5-flash-lite": 1000,
+        "models/gemini-2.0-flash": 200,
+        "models/gemini-2.0-flash-lite": 200,
+        "models/gemma-3-27b-it": 14400,
+        "models/gemini-embedding-001": 1000,
+        "models/gemma-3-12b-it": 14400
+    }
+    # Определяем путь к output заранее, чтобы передать его обоим модулям
+    output_directory = "output"
+    budget_manager = APIBudgetManager(output_directory, daily_limits)
 
     world_model = WorldModel(
         static_context={
@@ -142,6 +156,7 @@ def main():
             "main_goal": "Подготовить высококачественную, убедительную аналитическую записку для коммерческого директора ТГУ, предлагающую концепцию нового продукта в рамках существующей экосистемы iDO. **Цель записки — не просто предоставить информацию, а продемонстрировать мою способность взять на себя роль Владельца Продукта (Product Owner) для этого конкретного проекта, отвечая за его концепцию, логику и развитие от идеи до прототипа.**"
         },
         budget_manager=budget_manager,
+        output_dir=output_directory,
         force_fresh_start=args.fresh_start 
     )
 
@@ -152,17 +167,6 @@ def main():
         cache_dir=world_model.cache_dir
     )
 
-    daily_limits = {
-        "models/gemini-2.5-pro": 100,
-        "models/gemini-2.5-flash": 250,
-        "models/gemini-2.5-flash-lite": 1000,
-        "models/gemini-2.0-flash": 200,
-        "models/gemini-2.0-flash-lite": 200,
-        "models/gemma-3-27b-it": 14400,
-        "models/gemini-embedding-001": 1000,
-        "models/gemma-3-12b-it": 14400
-    }
-    budget_manager = APIBudgetManager(world_model.output_dir, daily_limits)
 
     expert_team = ExpertTeam(llms, search_agent, budget_manager)
     strategist = ChiefStrategist(llm=llms["strategist"], medium_llm=llms["expert_flash"], sanitizer_llm=llms["source_auditor"], budget_manager=budget_manager)

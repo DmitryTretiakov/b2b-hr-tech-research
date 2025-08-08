@@ -15,14 +15,9 @@ class WorldModel:
     def __init__(self, static_context: dict, budget_manager: APIBudgetManager, output_dir: str = "output", force_fresh_start: bool = False):
         self.static_context = static_context
         self.output_dir = output_dir
-        self.kb_dir = os.path.join(output_dir, "knowledge_base")
         self.log_dir = os.path.join(output_dir, "logs")
         self.cache_dir = os.path.join(output_dir, "cache")
-        embedding_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-001")
-        self.semantic_index = SemanticIndex(
-            embedding_model=embedding_model,
-            budget_manager=budget_manager # <--- ПЕРЕДАТЬ
-        )
+        
         # Определяем пути для всех персистентных артефактов
         self.state_file_path = os.path.join(self.output_dir, "system_state.json")
         self.index_path = os.path.join(self.output_dir, "faiss.index")
@@ -36,13 +31,18 @@ class WorldModel:
             if os.path.exists(self.id_map_path): os.remove(self.id_map_path)
                 
         # Создаем все директории, если их нет
-        os.makedirs(self.kb_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)
         os.makedirs(self.cache_dir, exist_ok=True)
 
-        # Инициализируем семантический индекс
+        # --- ИСПРАВЛЕННАЯ И ЕДИНСТВЕННАЯ ИНИЦИАЛИЗАЦИЯ ИНДЕКСА ---
+        # 1. Сначала инициализируем модель для эмбеддингов
         embedding_model = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
-        self.semantic_index = SemanticIndex(embedding_model=embedding_model)
+        
+        # 2. Затем создаем SemanticIndex, ПЕРЕДАВАЯ ему budget_manager
+        self.semantic_index = SemanticIndex(
+            embedding_model=embedding_model,
+            budget_manager=budget_manager 
+        )
 
         # Инициализируем пустое состояние по умолчанию
         self.dynamic_knowledge = {
@@ -52,7 +52,7 @@ class WorldModel:
             "generated_artifacts": {}
         }
         
-        # --- Новая, отказоустойчивая логика загрузки ---
+        # --- Отказоустойчивая логика загрузки ---
         # 1. Сначала пытаемся загрузить персистентный индекс с диска
         index_loaded = self.semantic_index.load_from_disk(self.index_path, self.id_map_path)
         
@@ -61,7 +61,7 @@ class WorldModel:
 
         # 3. Сверяем состояние. Если База Знаний загрузилась, а индекс - нет,
         #    запускаем аварийную перестройку индекса.
-        if self.dynamic_knowledge['knowledge_base'] and not index_loaded:
+        if self.dynamic_knowledge.get('knowledge_base') and not index_loaded:
             print("!!! [WorldModel] Обнаружена База Знаний, но отсутствует семантический индекс. Запускаю перестройку...")
             self.semantic_index.rebuild_from_kb(
                 self.dynamic_knowledge['knowledge_base'], 
