@@ -279,6 +279,12 @@ class ChiefStrategist:
         main_goal_as_query = world_model.get_full_context()['static_context']['main_goal']
         relevant_kb = self._get_balanced_rag_context(world_model, main_goal_as_query, k_for_summary)
 
+        MIN_FACTS_FOR_SUMMARY = 10 # Минимальное количество фактов для генерации
+        if not relevant_kb or len(relevant_kb) < MIN_FACTS_FOR_SUMMARY:
+            error_message = f"# ГЕНЕРАЦИЯ ПРОВАЛЕНА\n\nПричина: Недостаточно релевантных фактов в Базе Знаний для написания качественного отчета (найдено {len(relevant_kb)}, требуется минимум {MIN_FACTS_FOR_SUMMARY})."
+            print(f"!!! [Стратег] ОШИБКА: {error_message}")
+            return error_message
+    
         # Создаем облегченный контекст для промпта
         lean_context = {"relevant_knowledge_base": relevant_kb}
 
@@ -317,6 +323,13 @@ class ChiefStrategist:
         }
         main_goal_as_query = world_model.get_full_context()['static_context']['main_goal']
         relevant_kb = self._get_balanced_rag_context(world_model, main_goal_as_query, k_for_brief)
+
+        MIN_FACTS_FOR_SUMMARY = 20 # Минимальное количество фактов для генерации
+        if not relevant_kb or len(relevant_kb) < MIN_FACTS_FOR_SUMMARY:
+            error_message = f"# ГЕНЕРАЦИЯ ПРОВАЛЕНА\n\nПричина: Недостаточно релевантных фактов в Базе Знаний для написания качественного отчета (найдено {len(relevant_kb)}, требуется минимум {MIN_FACTS_FOR_SUMMARY})."
+            print(f"!!! [Стратег] ОШИБКА: {error_message}")
+            return error_message
+        
         lean_context = {"relevant_knowledge_base": relevant_kb}
 
         feedback_section = ""
