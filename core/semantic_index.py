@@ -4,19 +4,19 @@ import numpy as np
 import json
 import os
 import traceback
+import google.generativeai as genai
 from core.budget_manager import APIBudgetManager
 from google.api_core.exceptions import ResourceExhausted
-import google.generativeai as genai
 from core.embedding_client import GeminiEmbeddingClient
 
 class SemanticIndex:
     def __init__(self, embedding_client: GeminiEmbeddingClient, budget_manager: APIBudgetManager, save_every_n: int = 10):
-        self.embedding_model = embedding_client 
+        self.embedding_client = embedding_client
         self.budget_manager = budget_manager
         
         try:
             print("   [SemanticIndex] Определяю размерность векторов...")
-            self.dimension = self.embedding_client.get_embedding_dimension() # <-- ИЗМЕНЕНО
+            self.dimension = self.embedding_client.get_embedding_dimension()
             print(f"   [SemanticIndex] Размерность определена: {self.dimension}")
         except Exception as e:
             print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось определить размерность модели. Использую значение по умолчанию 768. Ошибка: {e}")
@@ -28,50 +28,7 @@ class SemanticIndex:
         self._add_counter = 0
         print(f"-> SemanticIndex (FAISS) инициализирован с динамически определенной размерностью {self.dimension}.")
 
-    def _get_embedding_dimension(self) -> int:
-        """
-        Делает один прямой вызов через официальную библиотеку google-generativeai,
-        чтобы гарантированно и явно задать параметры и определить размерность.
-        """
-        model_name_str = self.embedding_model.model
-        if not self.budget_manager.can_i_spend(model_name_str):
-            raise ResourceExhausted("Невозможно определить размерность, лимит API эмбеддингов исчерпан.")
-
-        try:
-            print("   [SemanticIndex] Выполняю прямой вызов API для определения размерности...")
-            
-            # --- НАЧАЛО ФИНАЛЬНОГО ИСПРАВЛЕНИЯ ---
-            # Получаем API ключ из окружения, как это делает вся система
-            api_key = os.getenv("GOOGLE_API_KEY")
-            if not api_key:
-                raise ValueError("GOOGLE_API_KEY не найден в окружении.")
-
-            # Создаем и конфигурируем наш собственный, чистый клиент
-            genai.configure(api_key=api_key)
-            
-            # Формируем правильный путь к модели
-            model_path = f"models/{model_name_str.split('/')[-1]}"
-
-            # Выполняем вызов, как в официальной документации
-            result = genai.embed_content(
-                model=model_path,
-                content="test",
-                task_type="RETRIEVAL_DOCUMENT",
-                output_dimensionality=768
-            )
-            # --- КОНЕЦ ФИНАЛЬНОГО ИСПРАВЛЕНИЯ ---
-            
-            self.budget_manager.record_spend(model_name_str)
-            return len(result['embedding'])
-            
-        except Exception as e:
-            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА [SemanticIndex]: Прямой вызов API для определения размерности не удался: {e}")
-            print("!!! СИСТЕМА НЕ МОЖЕТ ПРОДОЛЖАТЬ РАБОТУ В НЕОПРЕДЕЛЕННОМ СОСТОЯНИИ. АВАРИЙНОЕ ЗАВЕРШЕНИЕ.")
-            # Мы больше не пытаемся угадать. Если мы не можем контролировать размерность, система должна остановиться.
-            raise e
-        
     def save_to_disk(self, index_path: str, id_map_path: str):
-        """Сохраняет индекс FAISS и карту ID на диск."""
         print(f"   [SemanticIndex] -> Сохраняю индекс ({self.index.ntotal} векторов) на диск...")
         try:
             faiss.write_index(self.index, index_path)
@@ -82,12 +39,10 @@ class SemanticIndex:
             print(f"!!! КРИТИЧЕСКАЯ ОШИБКА [SemanticIndex]: Не удалось сохранить индекс. Ошибка: {e}")
 
     def load_from_disk(self, index_path: str, id_map_path: str) -> bool:
-        """Загружает индекс FAISS и карту ID с диска."""
         if os.path.exists(index_path) and os.path.exists(id_map_path):
             print("   [SemanticIndex] -> Загружаю индекс с диска...")
             try:
                 self.index = faiss.read_index(index_path)
-                # ПРОВЕРКА СОВМЕСТИМОСТИ
                 if self.index.d != self.dimension:
                     print(f"!!! ВНИМАНИЕ [SemanticIndex]: Размерность загруженного индекса ({self.index.d}) не совпадает с размерностью текущей модели ({self.dimension}). Индекс будет проигнорирован.")
                     return False
@@ -101,15 +56,10 @@ class SemanticIndex:
         return False
 
     def add_claim(self, claim_id: str, claim_text: str, index_path: str, id_map_path: str):
-        """Добавляет одно утверждение в индекс."""
         if claim_id in self.id_map:
             return
         try:
-            model_name = self.embedding_model.model
-            if not self.budget_manager.can_i_spend(model_name):
-                raise ResourceExhausted(f"Daily budget for embedding model {model_name} reached.")
             vector = self.embedding_client.embed_document(claim_text)
-            self.budget_manager.record_spend(model_name)
             vector_np = np.array([vector], dtype=np.float32)
             self.index.add(vector_np)
             self.id_map.append(claim_id)
@@ -123,15 +73,10 @@ class SemanticIndex:
             raise e
 
     def find_similar_claim_ids(self, query_text: str, top_k: int = 5) -> list[str]:
-        """Ищет похожие утверждения в индексе."""
         if self.index.ntotal == 0:
             return []
         try:
-            model_name = self.embedding_model.model
-            if not self.budget_manager.can_i_spend(model_name):
-                raise ResourceExhausted(f"Daily budget for embedding model {model_name} reached.")
             query_vector = self.embedding_client.embed_query(query_text)
-            self.budget_manager.record_spend(model_name)
             query_vector_np = np.array([query_vector], dtype=np.float32)
             distances, indices = self.index.search(query_vector_np, k=min(top_k, self.index.ntotal))
             similar_ids = [self.id_map[i] for i in indices[0]]
@@ -143,7 +88,6 @@ class SemanticIndex:
             raise e
 
     def rebuild_from_kb(self, knowledge_base: dict, index_path: str, id_map_path: str):
-        """АВАРИЙНЫЙ МЕТОД: Полностью перестраивает индекс из Базы Знаний."""
         print("   [SemanticIndex] !!! ВНИМАНИЕ: Запущена полная перестройка индекса из Базы Знаний...")
         self.index = faiss.IndexFlatL2(self.dimension)
         self.id_map = []
@@ -153,14 +97,8 @@ class SemanticIndex:
         self.save_to_disk(index_path, id_map_path)
 
     def _add_claim_internal(self, claim_id: str, claim_text: str):
-        """Внутренний метод для добавления без сохранения и с пропуском ошибок."""
         try:
-            model_name = self.embedding_model.model
-            if not self.budget_manager.can_i_spend(model_name):
-                print(f"!!! [Бюджет] Пропуск claim '{claim_id}' при перестройке из-за лимита API.")
-                return
-            vector = self.embedding_model.embed_query(claim_text)
-            self.budget_manager.record_spend(model_name)
+            vector = self.embedding_client.embed_document(claim_text)
             vector_np = np.array([vector], dtype=np.float32)
             self.index.add(vector_np)
             self.id_map.append(claim_id)

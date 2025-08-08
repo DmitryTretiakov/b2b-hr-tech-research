@@ -230,9 +230,36 @@ def main():
                 print("--- Стратег решил, что информации достаточно. Переходим к написанию финального отчета. ---")
                 break
             
+            # --- НАЧАЛО: ПРОТОКОЛ АВАРИЙНОГО ПЕРЕХОДА ФАЗЫ ---
             if not world_model.get_active_tasks():
-                print("!!! ВНИМАНИЕ: Стратег завершил фазу, но не создал новых задач и не завершил проект. Остановка во избежание бесконечного цикла.")
-                break
+                print("!!! [Supervisor] ВНИМАНИЕ: Стратег не создал новых задач. Активирую протокол принудительного перехода.")
+                
+                current_plan = world_model.get_full_context()['dynamic_knowledge']['strategic_plan']
+                phases = current_plan.get("phases", [])
+                
+                # 1. Находим и принудительно завершаем текущую фазу (если она еще активна)
+                for i, phase in enumerate(phases):
+                    if phase.get("status") == "IN_PROGRESS":
+                        print(f"   [Supervisor] -> Принудительно завершаю фазу '{phase.get('phase_name')}'.")
+                        phases[i]["status"] = "COMPLETED"
+                        break
+                
+                # 2. Находим и активируем следующую ожидающую фазу
+                next_phase_activated = False
+                for i, phase in enumerate(phases):
+                    if phase.get("status") == "PENDING":
+                        print(f"   [Supervisor] -> Активирую следующую фазу '{phase.get('phase_name')}'.")
+                        phases[i]["status"] = "IN_PROGRESS"
+                        next_phase_activated = True
+                        break
+                
+                # 3. Сохраняем измененный план
+                world_model.update_strategic_plan(current_plan)
+
+                if not next_phase_activated:
+                    print("!!! [Supervisor] КРИТИЧЕСКАЯ ОШИБКА: Следующая фаза для активации не найдена. Вероятно, план выполнен или поврежден. Остановка.")
+                    break # Выходим из главного цикла, так как работа действительно закончена
+            # --- КОНЕЦ ПРОТОКОЛА ---
             
             continue
 
