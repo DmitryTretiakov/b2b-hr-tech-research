@@ -33,6 +33,12 @@ def main():
         help='Начать новое исследование, игнорируя сохраненное состояние.'
     )
 
+    parser.add_argument(
+      '--new-plan-keep-kb',
+      action='store_true',
+      help='Начать новое исследование (сбросить план), но сохранить существующую Базу Знаний.'
+    )
+
     
     
     
@@ -157,7 +163,8 @@ def main():
         },
         budget_manager=budget_manager,
         output_dir=output_directory,
-        force_fresh_start=args.fresh_start 
+        force_fresh_start=args.fresh_start,
+        reset_plan_only=args.new_plan_keep_kb
     )
 
     search_agent = SearchAgent(

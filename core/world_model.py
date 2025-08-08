@@ -12,7 +12,7 @@ class WorldModel:
     Управляет планом, базой знаний и логами.
     Сохраняет свое состояние на диск при каждом изменении.
     """
-    def __init__(self, static_context: dict, budget_manager: APIBudgetManager, output_dir: str = "output", force_fresh_start: bool = False):
+    def __init__(self, static_context: dict, budget_manager: APIBudgetManager, output_dir: str = "output", force_fresh_start: bool = False, reset_plan_only: bool = False):
         self.static_context = static_context
         self.output_dir = output_dir
         self.log_dir = os.path.join(output_dir, "logs")
@@ -31,7 +31,20 @@ class WorldModel:
             if os.path.exists(self.state_file_path): os.remove(self.state_file_path)
             if os.path.exists(self.index_path): os.remove(self.index_path)
             if os.path.exists(self.id_map_path): os.remove(self.id_map_path)
-                
+
+
+        elif reset_plan_only:
+           print("!!! [WorldModel] Активирован режим 'reset-plan-only'. Сбрасываю план, но сохраняю Базу Знаний.")
+           if os.path.exists(self.state_file_path):
+               try:
+                   with open(self.state_file_path, 'r', encoding='utf-8') as f:
+                       temp_state = json.load(f)
+                   temp_state['strategic_plan'] = {} # Сбрасываем только план
+                   with open(self.state_file_path, 'w', encoding='utf-8') as f:
+                       json.dump(temp_state, f, ensure_ascii=False, indent=2)
+                   print("   [WorldModel] -> Стратегический план успешно сброшен.")
+               except Exception as e:
+                   print(f"!!! [WorldModel] ОШИБКА при сбросе плана: {e}. Запускаюсь как обычно.") 
         # Создаем все директории, если их нет
         os.makedirs(self.log_dir, exist_ok=True)
         os.makedirs(self.cache_dir, exist_ok=True)
@@ -100,7 +113,7 @@ class WorldModel:
     # --- НОВЫЙ ПРИВАТНЫЙ МЕТОД ДЛЯ СОХРАНЕНИЯ ---
     def _save_state_to_disk(self):
         """
-        Атомарно сохраняет полное состояние системы (state + index) через
+        Атомарно сохраняет полное состояние системы (state index) через
         двухфазную запись во временные файлы. Гарантирует консистентность.
         """
         print("   [WorldModel] -> Начало атомарной транзакции сохранения...")
