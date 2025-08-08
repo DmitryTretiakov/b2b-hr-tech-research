@@ -9,6 +9,9 @@ import time
 from langchain.output_parsers import PydanticOutputParser
 from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel
+from google.api_core.exceptions import ResourceExhausted
+from core.budget_manager import APIBudgetManager
+
 # --- НОВОЕ КАСТОМНОЕ ИСКЛЮЧЕНИЕ ---
 class SearchAPIFailureError(Exception):
     """Исключение, выбрасываемое, когда все поисковые API не смогли вернуть результат."""
@@ -263,6 +266,7 @@ def invoke_llm_for_json_with_retry(
     sanitizer_llm: ChatGoogleGenerativeAI,
     prompt: str,
     pydantic_schema: BaseModel,
+    budget_manager: APIBudgetManager,
     max_retries: int = 3
 ) -> dict:
     """
@@ -280,6 +284,12 @@ def invoke_llm_for_json_with_retry(
         
         current_prompt = prompt_with_instructions
         current_llm = main_llm
+
+        model_name = current_llm.model
+        if not budget_manager.can_i_spend(model_name):
+            print(f"!!! [Бюджет] ДНЕВНОЙ ЛИМИТ для {model_name} исчерпан. Попытка отменена.")
+            last_error = ResourceExhausted(f"Daily budget limit for {model_name} reached.")
+            continue # Переходим к следующей попытке (которая может использовать другую модель)
 
         if attempt == 1: # Вторая попытка: просим основную модель исправить свой же вывод
             print("      [JSON Invoker] Стратегия 2: Прошу основную модель исправить свой невалидный JSON.")
@@ -310,13 +320,18 @@ def invoke_llm_for_json_with_retry(
         try:
             response = current_llm.invoke(current_prompt)
             raw_output = response.content # Сохраняем сырой вывод для возможных исправлений
+            budget_manager.record_spend(model_name)
             parsed_object = parser.parse(raw_output)
             print("      [JSON Invoker] <- Ответ LLM успешно получен и распарсен.")
             return parsed_object.model_dump()
         except Exception as e:
+            if isinstance(e, ResourceExhausted):
+                 budget_manager.record_spend(model_name) # Записываем даже неудачную попытку, т.к. она была сделана
             last_error = e
             print(f"      [JSON Invoker] !!! Ошибка на попытке {attempt + 1}: {e}")
             time.sleep(3) # Небольшая пауза перед следующей попыткой
 
     print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось получить валидный JSON после {max_retries} попыток.")
+    if isinstance(last_error, ResourceExhausted):
+        raise last_error
     return {} # Возвращаем пустой словарь в случае полного провала

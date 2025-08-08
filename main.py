@@ -11,6 +11,7 @@ from agents.chief_strategist import ChiefStrategist
 from agents.expert_team import ExpertTeam
 from agents.search_agent import SearchAgent
 from utils.helpers import SearchAPIFailureError
+from google.api_core.exceptions import ResourceExhausted
 
 # --- КОНСТАНТЫ ДЛЯ УПРАВЛЕНИЯ СКОРОСТЬЮ И ПОПЫТКАМИ ---
 MAX_RETRIES = 3
@@ -158,7 +159,7 @@ def main():
         cache_dir=world_model.cache_dir
     )
     expert_team = ExpertTeam(llms, search_agent, budget_manager)
-    strategist = ChiefStrategist(llm=llms["strategist"], sanitizer_llm=llms["source_auditor"])
+    strategist = ChiefStrategist(llm=llms["strategist"], sanitizer_llm=llms["source_auditor"], budget_manager=budget_manager)
     
     # --- ЗАПУСК РАБОТЫ ---
     print("\n--- ЗАПУСК ОСНОВНОГО ЦИКЛА ОРКЕСТРАТОРА ---")
@@ -246,6 +247,13 @@ def main():
                 print(f"!!! ОРКЕСТРАТОР: Превышен лимит ({MAX_RETRIES}) повторных попыток для задачи {task_id}. Задача окончательно провалена.")
                 world_model.update_task_status(task_id, 'FAILED')
                 world_model.log_transaction({'task': task_to_run, 'results': f"CRITICAL SEARCH ERROR after {MAX_RETRIES} retries: {e}"})
+                
+        except ResourceExhausted as e:
+            print(f"!!! СИСТЕМНЫЙ СБОЙ: ДОСТИГНУТ ДНЕВНОЙ ЛИМИТ API. ОСТАНАВЛИВАЮ ВСЮ СИСТЕМУ.")
+            print(f"   -> Задача '{task_id}' остается в статусе PENDING.")
+            print(f"   -> Ошибка: {e}")
+            # Завершаем работу, так как дневной лимит исчерпан
+            break
 
         except Exception as e:
             print(f"!!! ОРКЕСТРАТОР: Произошла НЕПРЕДВИДЕННАЯ критическая ошибка при выполнении задачи {task_id}. Задача провалена. Ошибка: {e}")

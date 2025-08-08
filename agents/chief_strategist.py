@@ -6,6 +6,7 @@ from typing import List, Literal, TYPE_CHECKING
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.output_parsers import PydanticOutputParser
 from utils.helpers import invoke_llm_for_json_with_retry
+from core.budget_manager import APIBudgetManager
 
 
 # --- РЕШЕНИЕ ПРОБЛЕМЫ ЦИКЛИЧЕСКОЙ ЗАВИСИМОСТИ ТИПОВ ---
@@ -58,9 +59,10 @@ class ChiefStrategist:
     "Мозг" системы. Создает план, проводит рефлексию и пишет финальные отчеты.
     Работает с самой мощной моделью (gemini-pro).
     """
-    def __init__(self, llm: ChatGoogleGenerativeAI, sanitizer_llm: ChatGoogleGenerativeAI):
+    def __init__(self, llm: ChatGoogleGenerativeAI, sanitizer_llm: ChatGoogleGenerativeAI, budget_manager: APIBudgetManager):
       self.llm = llm
       self.sanitizer_llm = sanitizer_llm
+      self.budget_manager = budget_manager
       print("-> ChiefStrategist (на базе gemini-pro) готов к работе. Оснащен 'санитарной' моделью.")
 
     
@@ -108,7 +110,13 @@ class ChiefStrategist:
 
 Ты ОБЯЗАН вернуть результат в формате JSON, соответствующем предоставленной схеме.
 """
-        plan = invoke_llm_for_json_with_retry(self.llm, self.sanitizer_llm, prompt, StrategicPlan)
+        plan = invoke_llm_for_json_with_retry(
+            main_llm=self.llm,
+            sanitizer_llm=self.sanitizer_llm,
+            prompt=prompt,
+            pydantic_schema=StrategicPlan,
+            budget_manager=self.budget_manager
+        )
 
         if plan and "phases" in plan:
             print("   [Стратег] Первоначальный план успешно сгенерирован.")
@@ -179,7 +187,8 @@ class ChiefStrategist:
             main_llm=query_gen_llm,          # Основная модель - быстрая query_gen_llm
             sanitizer_llm=self.sanitizer_llm, # Резервная модель - из self.sanitizer_llm
             prompt=prompt,
-            pydantic_schema=RagQuerySet
+            pydantic_schema=RagQuerySet,
+            budget_manager=self.budget_manager
         )
 
         return report
@@ -241,7 +250,13 @@ class ChiefStrategist:
 
 Ты ОБЯЗАН вернуть результат в формате JSON, соответствующем предоставленной схеме.
 """
-        return invoke_llm_for_json_with_retry(self.llm, self.sanitizer_llm, prompt, StrategicPlan)
+        return invoke_llm_for_json_with_retry(
+            main_llm=self.llm,
+            sanitizer_llm=self.sanitizer_llm,
+            prompt=prompt,
+            pydantic_schema=StrategicPlan,
+            budget_manager=self.budget_manager
+        )
 
     def write_executive_summary(self, world_model: 'WorldModel', feedback: str = None) -> str:
         """Пишет короткую аналитическую записку, используя RAG-контекст."""
@@ -357,7 +372,8 @@ class ChiefStrategist:
             main_llm=validator_llm,          # Основная модель - та, что передали для валидации
             sanitizer_llm=self.sanitizer_llm, # Резервная модель - из self.sanitizer_llm
             prompt=prompt,
-            pydantic_schema=ValidationReport
+            pydantic_schema=ValidationReport,
+            budget_manager=self.budget_manager
         )
         # --- КОНЕЦ ИЗМЕНЕНИЯ ---
             
@@ -419,7 +435,8 @@ class ChiefStrategist:
             main_llm=filter_llm,             # Основная модель - быстрая filter_llm
             sanitizer_llm=self.sanitizer_llm, # Резервная модель - из self.sanitizer_llm
             prompt=prompt,
-            pydantic_schema=BatchRelevanceReport
+            pydantic_schema=BatchRelevanceReport,
+            budget_manager=self.budget_manager
         )
         # --- КОНЕЦ ИЗМЕНЕНИЯ ---
         

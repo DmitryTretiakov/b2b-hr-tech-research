@@ -150,7 +150,13 @@ class ExpertTeam:
 
 Верни результат в виде JSON.
 """
-        query_report = invoke_llm_for_json_with_retry(arbiter_llm, self.llms['expert_lite'], prompt_step1, ArbitrationSearchQuery)
+        query_report = invoke_llm_for_json_with_retry(
+            main_llm=arbiter_llm,
+            sanitizer_llm=self.llms['expert_lite'],
+            prompt=prompt_step1,
+            pydantic_schema=ArbitrationSearchQuery,
+            budget_manager=self.budget_manager
+        )
         if not query_report or 'query' not in query_report:
             print("   [Арбитр] !!! Не удалось сгенерировать поисковый запрос. Задача провалена.")
             world_model.update_task_status(task['task_id'], 'FAILED')
@@ -178,7 +184,13 @@ class ExpertTeam:
 2.  **Прими финальное решение:** Какое из первоначальных утверждений (А или Б) подтверждается новыми доказательствами?
 3.  **Заполни отчет** в формате JSON, указав ID победившего и проигравшего утверждения, ссылку на самый убедительный новый источник и краткое обоснование своего решения.
 """
-        final_report = invoke_llm_for_json_with_retry(arbiter_llm, self.llms['expert_lite'], prompt_step2, ArbitrationReport)
+        final_report = invoke_llm_for_json_with_retry(
+            main_llm=arbiter_llm,
+            sanitizer_llm=self.llms['expert_lite'],
+            prompt=prompt_step2,
+            pydantic_schema=ArbitrationReport,
+            budget_manager=self.budget_manager
+        )
 
         # --- 5. Обновление Базы Знаний на основе вердикта ---
         if not final_report or 'winning_claim_id' not in final_report:
@@ -230,7 +242,13 @@ class ExpertTeam:
 **ИНСТРУКЦИЯ:** Верни результат в виде ОДНОГО JSON-объекта. Ключами в этом объекте должны быть предоставленные URL, а значениями — объекты с единственным полем 'source_type'. Если URL не соответствует ни одному типу или ссылка не работает, используй тип 'UNKNOWN'.
 """
         
-        report = invoke_llm_for_json_with_retry(auditor_llm, self.llms['expert_lite'], prompt, BatchAuditReport)
+        report = invoke_llm_for_json_with_retry(
+            main_llm=auditor_llm,
+            sanitizer_llm=self.llms['expert_lite'],
+            prompt=prompt,
+            pydantic_schema=BatchAuditReport,
+            budget_manager=self.budget_manager
+        )
         
         processed_report = {}
         if report and 'audit_results' in report:
@@ -256,7 +274,7 @@ class ExpertTeam:
             return []
 
         print(f"      [Пакетный NLI Аудитор] -> Сравниваю '{new_claim['claim_id']}' с {len(existing_claims)} кандидатами...")
-        llm = self.llms["expert_flash"] # Надежная модель для NLI
+        llm_for_nli = self._get_llm_for_nli()
 
         # Формируем текст существующих утверждений для промпта
         existing_claims_text = "\n".join(
@@ -283,7 +301,13 @@ class ExpertTeam:
 Верни результат в виде ОДНОГО JSON-объекта, соответствующего предоставленной схеме.
 """
         
-        report = invoke_llm_for_json_with_retry(llm, self.llms['expert_lite'], prompt, BatchNLIReport)
+        report = invoke_llm_for_json_with_retry(
+            main_llm=llm_for_nli,
+            sanitizer_llm=self.llms['expert_lite'],
+            prompt=prompt,
+            pydantic_schema=BatchNLIReport,
+            budget_manager=self.budget_manager
+        )
         
         # --- Дросселирование ПОСЛЕ вызова. 10 RPM -> 6с/запрос ---
         # Мы все еще делаем K вызовов, поэтому оставляем защиту от всплесков.
@@ -432,7 +456,13 @@ class ExpertTeam:
 Сгенерируй от 4 до 6 максимально конкретных и разнообразных поисковых запросов на русском языке, которые помогут эксперту найти ДОКАЗАТЕЛЬСТВА и ФАКТЫ для выполнения его задачи.
 Ты ОБЯЗАН вернуть результат в формате JSON, соответствующем предоставленной схеме."""
         llm = self._get_llm_for_expert(assignee)
-        queries = invoke_llm_for_json_with_retry(llm, self.llms['expert_lite'], prompt, SearchQueries)
+        queries = invoke_llm_for_json_with_retry(
+            main_llm=llm,
+            sanitizer_llm=self.llms['expert_lite'],
+            prompt=prompt,
+            pydantic_schema=SearchQueries,
+            budget_manager=self.budget_manager
+        )
         if queries.get('queries'):
             print(f"   [Эксперт {assignee}] -> Поисковые запросы сгенерированы: {queries['queries']}")
         else:
@@ -456,7 +486,13 @@ class ExpertTeam:
 {search_results}
 ---"""
         llm = self._get_llm_for_expert(assignee)
-        claims = invoke_llm_for_json_with_retry(llm, self.llms['expert_lite'], prompt, ClaimList)
+        claims = invoke_llm_for_json_with_retry(
+            main_llm=llm,
+            sanitizer_llm=self.llms['expert_lite'],
+            prompt=prompt,
+            pydantic_schema=ClaimList,
+            budget_manager=self.budget_manager
+        )
         if claims.get('claims'):
             print(f"   [Эксперт {assignee}] -> Создан черновик из {len(claims['claims'])} утверждений.")
         else:
@@ -478,7 +514,13 @@ class ExpertTeam:
 ---
 Ты ОБЯЗАН вернуть результат в формате JSON, соответствующем предоставленной схеме."""
         auditor_llm = self.llms["expert_flash"] # Аудитор всегда "умный"
-        vulnerabilities = invoke_llm_for_json_with_retry(auditor_llm, self.llms['expert_lite'], prompt, AuditReport)
+        vulnerabilities = invoke_llm_for_json_with_retry(
+            main_llm=auditor_llm,
+            sanitizer_llm=self.llms['expert_lite'],
+            prompt=prompt,
+            pydantic_schema=AuditReport,
+            budget_manager=self.budget_manager
+        )
         if vulnerabilities.get('vulnerabilities'):
             print(f"   [Аудитор] -> Проверка завершена.")
         else:
@@ -508,7 +550,13 @@ class ExpertTeam:
 ---
 Ты ОБЯЗАН вернуть результат в формате JSON, соответствующем предоставленной схеме. Все утверждения должны иметь статус 'UNVERIFIED'."""
         llm = self._get_llm_for_expert(assignee)
-        final_claims_dict = invoke_llm_for_json_with_retry(llm, self.llms['expert_lite'], prompt, ClaimList)
+        final_claims_dict = invoke_llm_for_json_with_retry(
+            main_llm=llm,
+            sanitizer_llm=self.llms['expert_lite'],
+            prompt=prompt,
+            pydantic_schema=ClaimList,
+            budget_manager=self.budget_manager
+        )
         
         if final_claims_dict.get('claims'):
             print(f"   [Эксперт {assignee}] -> Утверждения финализированы.")
@@ -549,7 +597,13 @@ class ExpertTeam:
 """
         report = None
         print(f"      [FinancialModelAgent] Генерирую отчет с отказоустойчивым механизмом...")
-        report = invoke_llm_for_json_with_retry(arbiter_llm, self.llms['expert_lite'], prompt, FinancialReport)
+        report = invoke_llm_for_json_with_retry(
+            main_llm=arbiter_llm,
+            sanitizer_llm=self.llms['expert_lite'],
+            prompt=prompt,
+            pydantic_schema=FinancialReport,
+            budget_manager=self.budget_manager
+        )
         
         # --- Проверка результата ПОСЛЕ цикла ---
         if report:
@@ -585,7 +639,13 @@ class ExpertTeam:
 """
         report = None
         print(f"      [ProductManagerAgent] Генерирую отчет с отказоустойчивым механизмом...")
-        report = invoke_llm_for_json_with_retry(arbiter_llm, self.llms['expert_lite'], prompt, ProductBrief)
+        report = invoke_llm_for_json_with_retry(
+            main_llm=arbiter_llm,
+            sanitizer_llm=self.llms['expert_lite'],
+            prompt=prompt,
+            pydantic_schema=ProductBrief,
+            budget_manager=self.budget_manager
+        )
 
         # --- Проверка результата ПОСЛЕ цикла ---
         if report:
@@ -597,3 +657,24 @@ class ExpertTeam:
         else:
             print(f"   [ProductManagerAgent] !!! Не удалось сгенерировать отчет после 3 попыток.")
             world_model.update_task_status(task['task_id'], 'FAILED')
+    
+    def _get_llm_for_nli(self) -> ChatGoogleGenerativeAI:
+        """
+        Выбирает наилучшую доступную модель СПЕЦИАЛЬНО для задачи NLI.
+        Приоритет: Flash -> Gemma.
+        """
+        # Приоритет 1: Мощная модель, если есть бюджет
+        flash_model_name = "models/gemini-2.5-flash"
+        if self.budget_manager.can_i_spend(flash_model_name):
+            print("   [NLI Диспетчер] Использую Gemini Flash для NLI.")
+            return self.llms["source_auditor"]
+
+        # Приоритет 2: Резервная модель Gemma
+        gemma_model_name = "models/gemma-3-27b-it"
+        print(f"!!! [NLI Диспетчер] Бюджет для {flash_model_name} исчерпан. Переключаюсь на {gemma_model_name} для NLI.")
+        if self.budget_manager.can_i_spend(gemma_model_name):
+            return self.llms["source_auditor"] # Ваша модель Gemma
+
+        # Полный провал
+        print("!!! КРИТИЧЕСКИЙ СБОЙ NLI: Все подходящие модели исчерпали дневной лимит.")
+        raise ResourceExhausted("All models suitable for NLI have reached their daily budget limit.")
