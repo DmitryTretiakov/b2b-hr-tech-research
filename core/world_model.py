@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from core.semantic_index import SemanticIndex
+from core.budget_manager import APIBudgetManager
 
 class WorldModel:
     """
@@ -11,13 +12,17 @@ class WorldModel:
     Управляет планом, базой знаний и логами.
     Сохраняет свое состояние на диск при каждом изменении.
     """
-    def __init__(self, static_context: dict, output_dir: str = "output", force_fresh_start: bool = False):
+    def __init__(self, static_context: dict, budget_manager: APIBudgetManager, output_dir: str = "output", force_fresh_start: bool = False):
         self.static_context = static_context
         self.output_dir = output_dir
         self.kb_dir = os.path.join(output_dir, "knowledge_base")
         self.log_dir = os.path.join(output_dir, "logs")
         self.cache_dir = os.path.join(output_dir, "cache")
-        
+        embedding_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-001")
+        self.semantic_index = SemanticIndex(
+            embedding_model=embedding_model,
+            budget_manager=budget_manager # <--- ПЕРЕДАТЬ
+        )
         # Определяем пути для всех персистентных артефактов
         self.state_file_path = os.path.join(self.output_dir, "system_state.json")
         self.index_path = os.path.join(self.output_dir, "faiss.index")

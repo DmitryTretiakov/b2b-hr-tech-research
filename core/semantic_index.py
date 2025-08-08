@@ -4,12 +4,14 @@ import numpy as np
 import json
 import os
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-
+from core.budget_manager import APIBudgetManager # <--- Добавить
+from google.api_core.exceptions import ResourceExhausted # <--- Добавить
 class SemanticIndex:
-    def __init__(self, embedding_model: GoogleGenerativeAIEmbeddings, dimension: int = 768, save_every_n: int = 10):
+    def __init__(self, embedding_model: GoogleGenerativeAIEmbeddings, budget_manager: APIBudgetManager, dimension: int = 768, save_every_n: int = 10):
         self.embedding_model = embedding_model
         self.dimension = dimension
         self.index = faiss.IndexFlatL2(dimension)
+        self.budget_manager = budget_manager
         self.id_map = []
         self.save_every_n = save_every_n
         self._add_counter = 0
@@ -26,6 +28,33 @@ class SemanticIndex:
         except Exception as e:
             print(f"!!! КРИТИЧЕСКАЯ ОШИБКА [SemanticIndex]: Не удалось сохранить индекс. Ошибка: {e}")
 
+    def add_claim(self, claim_id: str, claim_text: str, index_path: str, id_map_path: str):
+        if claim_id in self.id_map:
+            return
+            
+        try:
+            # --- НАЧАЛО: ПРОВЕРКА БЮДЖЕТА ---
+            model_name = self.embedding_model.model
+            if not self.budget_manager.can_i_spend(model_name):
+                print(f"!!! [Бюджет] ДНЕВНОЙ ЛИМИТ для модели эмбеддингов {model_name} ИСЧЕРПАН.")
+                raise ResourceExhausted(f"Daily budget for embedding model {model_name} reached.")
+            # --- КОНЕЦ: ПРОВЕРКА БЮДЖЕТА ---
+
+            vector = self.embedding_model.embed_query(claim_text)
+            self.budget_manager.record_spend(model_name) # <--- ЗАПИСЬ УСПЕШНОЙ ТРАТЫ
+            
+            vector_np = np.array([vector], dtype=np.float32)
+            self.index.add(vector_np)
+            self.id_map.append(claim_id)
+            self._add_counter += 1
+            
+            if self._add_counter % self.save_every_n == 0:
+                self.save_to_disk(index_path, id_map_path)
+        except Exception as e:
+            print(f"!!! ОШИБКА [SemanticIndex]: Не удалось добавить claim '{claim_id}'. Ошибка: {e}")
+            # Перевыбрасываем ошибку, чтобы ее поймал оркестратор
+            raise e
+    
     def load_from_disk(self, index_path: str, id_map_path: str) -> bool:
         """Загружает индекс FAISS и карту ID с диска."""
         if os.path.exists(index_path) and os.path.exists(id_map_path):
@@ -59,9 +88,28 @@ class SemanticIndex:
             print(f"!!! ОШИБКА [SemanticIndex]: Не удалось добавить claim '{claim_id}'. Ошибка: {e}")
 
     def find_similar_claim_ids(self, query_text: str, top_k: int = 5) -> list[str]:
-        """Находит top_k самых похожих claim_id для данного текста."""
         if self.index.ntotal == 0:
             return []
+
+        try:
+            # --- НАЧАЛО: ПРОВЕРКА БЮДЖЕТА ---
+            model_name = self.embedding_model.model
+            if not self.budget_manager.can_i_spend(model_name):
+                print(f"!!! [Бюджет] ДНЕВНОЙ ЛИМИТ для модели эмбеддингов {model_name} ИСЧЕРПАН.")
+                raise ResourceExhausted(f"Daily budget for embedding model {model_name} reached.")
+            # --- КОНЕЦ: ПРОВЕРКА БЮДЖЕТА ---
+
+            query_vector = self.embedding_model.embed_query(query_text)
+            self.budget_manager.record_spend(model_name) # <--- ЗАПИСЬ УСПЕШНОЙ ТРАТЫ
+
+            query_vector_np = np.array([query_vector], dtype=np.float32)
+            distances, indices = self.index.search(query_vector_np, k=min(top_k, self.index.ntotal))
+            similar_ids = [self.id_map[i] for i in indices[0]]
+            return similar_ids
+        except Exception as e:
+            # Мы больше не скрываем ошибку. Мы передаем ее наверх.
+            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА [SemanticIndex]: Не удалось выполнить поиск.")
+            raise e
 
         try:
             query_vector = self.embedding_model.embed_query(query_text)
