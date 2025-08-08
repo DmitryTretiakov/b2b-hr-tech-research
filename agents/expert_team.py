@@ -208,13 +208,15 @@ class ExpertTeam:
         print("   [Арбитр] <- Конфликт успешно разрешен.")
         world_model.update_task_status(task['task_id'], 'COMPLETED')
 
-    def _get_llm_for_task(self, task_type: str) -> ChatGoogleGenerativeAI:
-        """Единый диспетчер моделей для разных типов задач."""
+    def _get_llm_for_task(self, task_type: Literal['ROUTINE', 'NLI', 'AUDIT', 'SPECIALIST']) -> ChatGoogleGenerativeAI:
+        """
+        Единый диспетчер моделей. Выбирает LLM на основе типа задачи и доступного бюджета.
+        """
         if task_type == 'NLI':
-            flash_model_name = "models/gemini-2.5-flash"
+            flash_lite_model_name = "models/gemini-2.5-flash-lite"
             if self.budget_manager.can_i_spend(flash_model_name):
-                print(f"   [Диспетчер NLI] Использую основную модель: {flash_model_name}")
-                return self.llms["expert_flash"]
+                print(f"   [Диспетчер NLI] Использую основную модель: {flash_lite_model_name}")
+                return self.llms["expert_lite"]
 
             gemma_model_name = "models/gemma-3-27b-it"
             print(f"!!! ВНИМАНИЕ: [Диспетчер NLI] Бюджет для {flash_model_name} исчерпан. Переключаюсь на резерв {gemma_model_name}.")
