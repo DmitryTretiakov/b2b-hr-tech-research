@@ -20,6 +20,10 @@ class SearchQueries(BaseModel):
     """Описывает список поисковых запросов."""
     queries: List[str] = Field(description="Список из 4-6 конкретных и разнообразных поисковых запросов на русском языке.")
 
+class BatchVulnerabilityReport(BaseModel):
+    """Пакетный отчет аудитора с перечнем уязвимостей для каждого утверждения."""
+    vulnerabilities: Dict[str, List[str]] = Field(description="Словарь, где ключ - это claim_id, а значение - список найденных уязвимостей. Если уязвимостей для claim_id нет, его можно не включать в словарь или оставить с пустым списком.")
+
 class Claim(BaseModel):
     """Описывает одно конкретное, верифицируемое 'Утверждение' (Claim)."""
     claim_id: str = Field(description="Короткий, уникальный и информативный ID на английском (например, 'websoft_customization_weakness').")
@@ -445,7 +449,7 @@ class ExpertTeam:
             print(f"   [Эксперт {assignee}] -> Пакетный аудит и обогащение {len(enriched_claims)} утверждений завершены.")
 
             # Шаг 4: Аудит содержимого
-            vulnerabilities_dict = self._audit_claims(enriched_claims, world_model_context)
+            vulnerabilities_dict = self._batch_audit_claims(enriched_claims, world_model_context)
             if vulnerabilities_dict is None or 'vulnerabilities' not in vulnerabilities_dict:
                 print(f"!!! Эксперт {assignee}: Процесс аудита провалился и не вернул структуру данных. Прерываю обработку.")
                 return []
@@ -818,3 +822,36 @@ class ExpertTeam:
         
         print(f"   [ExpertTeam] <- Создано {len(tasks)} контрарных задач.")
         return tasks
+    
+    def _batch_audit_claims(self, claims_batch: list, context: dict) -> dict:
+        """Проводит "враждебный аудит" для ПАКЕТА утверждений одним вызовом LLM."""
+        if not claims_batch:
+            return {}
+        
+        print(f"   [Пакетный Аудитор] -> Провожу аудит пакета из {len(claims_batch)} утверждений...")
+        prompt = f"""**ОБЩАЯ МИССИЯ ПРОЕКТА:**
+{context['static_context']['main_goal']}
+**ТВОЯ РОЛЬ И ЗАДАЧА:**
+Твоя Роль: "Враждебный Аудитор". Ты не доверяешь ничему.
+Твоя Задача: Тебе предоставлен ПАКЕТ "Утверждений". Для КАЖДОГО `claim_id` из пакета найди логические ошибки, слабые места или недостаток доказательств.
+Для каждого `claim_id`, у которого ты нашел проблемы, верни список текстовых "уязвимостей". Если уязвимостей у какого-то утверждения нет, просто не включай его `claim_id` в итоговый словарь.
+
+**ПАКЕТ УТВЕРЖДЕНИЙ ДЛЯ АУДИТА:**
+---
+{json.dumps(claims_batch, ensure_ascii=False, indent=2)}
+---
+Ты ОБЯЗАН вернуть результат в формате JSON, соответствующем предоставленной схеме.
+"""
+        auditor_llm = self._get_llm_for_task('AUDIT') # Оставляем Gemini 2.5 Flash
+        report = invoke_llm_for_json_with_retry(
+            main_llm=auditor_llm,
+            sanitizer_llm=self.llms['expert_lite'],
+            prompt=prompt,
+            pydantic_schema=BatchVulnerabilityReport,
+            budget_manager=self.budget_manager
+        )
+        if report.get('vulnerabilities') is not None:
+            print(f"   [Пакетный Аудитор] <- Проверка пакета завершена.")
+        else:
+            print(f"!!! Пакетный Аудитор: Не удалось провести аудит.")
+        return report
