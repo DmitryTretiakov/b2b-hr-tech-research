@@ -23,7 +23,7 @@ RETRY_DELAY_SECONDS = 300
 # Задержка после КАЖДОЙ выполненной задачи для снижения общей частоты запросов
 TASK_COOLDOWN_SECONDS = 15 
 # Задержка после ресурсоемкой операции рефлексии у Стратега
-STRATEGIST_COOLDOWN_SECONDS = 30 
+STRATEGIST_COOLDOWN_SECONDS = 20 
 
 def main():
     parser = argparse.ArgumentParser(description="Автономный Проектный Офис")
