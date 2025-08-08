@@ -566,12 +566,3 @@ class ChiefStrategist:
             print("   [Стратег.GapAnalysis] <- Пробелов не найдено. Данные признаны полными.")
             
         return tasks
-
-    # Также нужно добавить метод для обновления статуса в world_model
-    def update_main_goal_status(self, new_status: str):
-        """Обновляет только статус главной цели в плане."""
-        plan = self.dynamic_knowledge.get("strategic_plan", {})
-        if plan:
-            plan["main_goal_status"] = new_status
-            print(f"   [WorldModel] Статус главной цели обновлен на '{new_status}'.")
-            self._save_state_to_disk()
