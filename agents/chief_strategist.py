@@ -7,6 +7,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.output_parsers import PydanticOutputParser
 from utils.helpers import invoke_llm_for_json_with_retry
 from core.budget_manager import APIBudgetManager
+from google.api_core.exceptions import ResourceExhausted
 
 
 # --- РЕШЕНИЕ ПРОБЛЕМЫ ЦИКЛИЧЕСКОЙ ЗАВИСИМОСТИ ТИПОВ ---
@@ -79,14 +80,23 @@ class ChiefStrategist:
 
 
     def _invoke_llm_for_text(self, prompt: str) -> str:
-        """Простой вызов LLM для генерации текста."""
-        print("   [Стратег] -> Вызов LLM для генерации текста...")
-        try:
-            response = self.llm.invoke(prompt)
-            return response.content
-        except Exception as e:
-            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА LLM: Вызов API провалился. Ошибка: {e}")
-            return ""
+      """Простой вызов LLM для генерации текста с контролем бюджета."""
+      model_name = self.llm.model
+      if not self.budget_manager.can_i_spend(model_name):
+          print(f"!!! [Бюджет] ДНЕВНОЙ ЛИМИТ для стратегической модели {model_name} ИСЧЕРПАН.")
+          raise ResourceExhausted(f"Daily budget limit reached for strategic model {model_name}")
+
+      print(f"   [Стратег] -> Вызов LLM ({model_name}) для генерации текста...")
+      try:
+          response = self.llm.invoke(prompt)
+          self.budget_manager.record_spend(model_name) # Записываем успешную трату
+          return response.content
+      except Exception as e:
+          # Если это ошибка квоты, она уже была потрачена
+          if isinstance(e, ResourceExhausted):
+              self.budget_manager.record_spend(model_name)
+          print(f"!!! КРИТИЧЕСКАЯ ОШИБКА LLM: Вызов API провалился. Ошибка: {e}")
+          raise e # Перевыбрасываем ошибку, чтобы ее поймал оркестратор
 
     def create_strategic_plan(self, world_model_context: dict) -> dict:
         """

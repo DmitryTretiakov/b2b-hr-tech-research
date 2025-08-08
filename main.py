@@ -32,17 +32,8 @@ def main():
         help='Начать новое исследование, игнорируя сохраненное состояние.'
     )
 
-    daily_limits = {
-        "models/gemini-2.5-pro": 100,
-        "models/gemini-2.5-flash": 250,
-        "models/gemini-2.5-flash-lite": 1000,
-        "models/gemini-2.0-flash": 200,
-        "models/gemini-2.0-flash-lite": 200,
-        "models/gemma-3-27b-it": 14400,
-        "models/gemini-embedding-001": 1000,
-        "models/gemma-3-12b-it": 14400
-    }
-    budget_manager = APIBudgetManager(world_model.output_dir, daily_limits)
+    
+    
     
     args = parser.parse_args()
     # --- ИНИЦИАЛИЗАЦИЯ ---
@@ -158,6 +149,19 @@ def main():
         serper_api_key=os.getenv("SERPAPI_API_KEY"),
         cache_dir=world_model.cache_dir
     )
+    
+    daily_limits = {
+        "models/gemini-2.5-pro": 100,
+        "models/gemini-2.5-flash": 250,
+        "models/gemini-2.5-flash-lite": 1000,
+        "models/gemini-2.0-flash": 200,
+        "models/gemini-2.0-flash-lite": 200,
+        "models/gemma-3-27b-it": 14400,
+        "models/gemini-embedding-001": 1000,
+        "models/gemma-3-12b-it": 14400
+    }
+    budget_manager = APIBudgetManager(world_model.output_dir, daily_limits)
+
     expert_team = ExpertTeam(llms, search_agent, budget_manager)
     strategist = ChiefStrategist(llm=llms["strategist"], sanitizer_llm=llms["source_auditor"], budget_manager=budget_manager)
     
@@ -247,7 +251,7 @@ def main():
                 print(f"!!! ОРКЕСТРАТОР: Превышен лимит ({MAX_RETRIES}) повторных попыток для задачи {task_id}. Задача окончательно провалена.")
                 world_model.update_task_status(task_id, 'FAILED')
                 world_model.log_transaction({'task': task_to_run, 'results': f"CRITICAL SEARCH ERROR after {MAX_RETRIES} retries: {e}"})
-                
+
         except ResourceExhausted as e:
             print(f"!!! СИСТЕМНЫЙ СБОЙ: ДОСТИГНУТ ДНЕВНОЙ ЛИМИТ API. ОСТАНАВЛИВАЮ ВСЮ СИСТЕМУ.")
             print(f"   -> Задача '{task_id}' остается в статусе PENDING.")

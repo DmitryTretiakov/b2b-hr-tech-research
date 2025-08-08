@@ -686,14 +686,14 @@ class ExpertTeam:
         gemma_model_name = "models/gemma-3-27b-it"
         
         if self.budget_manager.can_i_spend(gemma_model_name):
-            print("   [NLI Диспетчер] Использую Gemini Flash для NLI.")
+            print("   [NLI Диспетчер] Использую Gemma для NLI.")
             return self.llms["source_auditor"]
 
         # Приоритет 2: Резервная модель flash-lite
         flash_lite_model_name = "models/gemini-2.5-flash-lite"
         print(f"!!! [NLI Диспетчер] Бюджет для {flash_lite_model_name} исчерпан. Переключаюсь на {flash_lite_model_name} для NLI.")
         if self.budget_manager.can_i_spend(flash_lite_model_name):
-            return self.llms["source_auditor"] 
+            return self.llms["expert_lite"] 
 
         # Полный провал
         print("!!! КРИТИЧЕСКИЙ СБОЙ NLI: Все подходящие модели исчерпали дневной лимит.")
