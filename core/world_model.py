@@ -45,7 +45,6 @@ class WorldModel:
         self.dynamic_knowledge = {
             "strategic_plan": {},
             "knowledge_base": {},
-            "transaction_log": [],
             "generated_artifacts": {}
         }
         
@@ -216,6 +215,34 @@ class WorldModel:
         else:
             print(f"   [WorldModel] !!! Внимание: Задача с ID '{task_id}' не найдена для инкремента попыток.")
 
+    def get_reflection_context(self) -> dict:
+        """
+        Возвращает специальный, "облегченный" контекст для рефлексии Стратега.
+        Не содержит тяжелых логов, но включает краткую сводку по последней фазе.
+        """
+        plan = self.dynamic_knowledge.get("strategic_plan", {})
+        last_phase_summary = "No phases completed yet."
+        
+        # Находим последнюю завершенную фазу
+        completed_phases = [p for p in plan.get("phases", []) if p.get("status") == "COMPLETED"]
+        if completed_phases:
+            last_phase = completed_phases[-1]
+            tasks = last_phase.get("tasks", [])
+            completed_count = sum(1 for t in tasks if t.get("status") == "COMPLETED")
+            failed_count = sum(1 for t in tasks if t.get("status") == "FAILED")
+            last_phase_summary = (f"Summary for last phase '{last_phase.get('phase_name')}': "
+                                f"{len(tasks)} total tasks, "
+                                f"{completed_count} completed, {failed_count} failed.")
+
+        return {
+            "static_context": self.static_context,
+            "dynamic_knowledge": {
+                "strategic_plan": self.dynamic_knowledge.get("strategic_plan"),
+                "knowledge_base": self.dynamic_knowledge.get("knowledge_base"),
+                "last_phase_summary": last_phase_summary # <-- Краткая сводка вместо логов
+            }
+        }
+
     def log_transaction(self, transaction: dict):
         """Логирует транзакцию, сохраняет ее в отдельный файл и СОХРАНЯЕТ ОБЩЕЕ СОСТОЯНИЕ."""
         try:
@@ -225,9 +252,7 @@ class WorldModel:
             tx_id = (f"tx_{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
                      f"{assignee}_{task_id}")
             
-            transaction['transaction_id'] = tx_id
-            self.dynamic_knowledge["transaction_log"].append(transaction)
-            
+            transaction['transaction_id'] = tx_id            
             log_filename = f"{tx_id}.json"
             with open(os.path.join(self.log_dir, log_filename), "w", encoding="utf-8") as f:
                 json.dump(transaction, f, ensure_ascii=False, indent=2)

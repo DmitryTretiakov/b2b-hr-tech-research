@@ -151,13 +151,13 @@ class ChiefStrategist:
         """
         print("   [Стратег] Шаг X: Провожу интеллектуальную рефлексию...")
         
-        full_context = world_model.get_full_context()
+        reflection_context = world_model.get_reflection_context()
 
         # Шаг А: Осмысление ситуации (без изменений)
-        situation_summary = self._summarize_situation(full_context)
+        situation_summary = self._summarize_situation(reflection_context)
         if not situation_summary:
             print("!!! Стратег: Не удалось осмыслить ситуацию. План не будет обновлен.")
-            return full_context['dynamic_knowledge']['strategic_plan']
+            return reflection_context['dynamic_knowledge']['strategic_plan']
 
         # Шаг Б: Получение сбалансированного контекста с помощью единого RAG-метода
         # Для рефлексии нам не нужен очень широкий контекст.
@@ -169,14 +169,14 @@ class ChiefStrategist:
         relevant_kb = self._get_balanced_rag_context(world_model, situation_summary, k_for_reflection)
 
         # Шаг В: Генерация обновленного плана
-        updated_plan = self._generate_updated_plan(situation_summary, full_context, relevant_kb)
+        updated_plan = self._generate_updated_plan(situation_summary, reflection_context, relevant_kb)
 
         if updated_plan and "phases" in updated_plan:
             print("   [Стратег] Рефлексия завершена. План обновлен.")
             return updated_plan
         else:
             print("!!! Стратег: Не удалось сгенерировать обновленный план. План не будет обновлен.")
-            return full_context['dynamic_knowledge']['strategic_plan']
+            return reflection_context['dynamic_knowledge']['strategic_plan']
         
     def _generate_rag_queries(self, situation_summary: str) -> dict:
         """
@@ -204,19 +204,21 @@ class ChiefStrategist:
         )
         return report
     
-    def _summarize_situation(self, world_model_context: dict) -> str:
+    def _summarize_situation(self, reflection_context: dict) -> str:
         """Шаг А рефлексии: Анализ и выводы в свободной форме."""
         print("      [Стратег.Рефлексия] Шаг А: Анализирую текущую ситуацию...")
         prompt = f"""**ТВОЯ РОЛЬ:** Главный Продуктовый Стратег.
 **ТВОЯ ЗАДАЧА:** Проанализировать все имеющиеся данные по завершенной фазе исследования и написать краткую сводку (summary) в свободной форме.
 
-**ПОЛНЫЙ КОНТЕКСТ И РЕЗУЛЬТАТЫ:**
+**ОБЛЕГЧЕННЫЙ КОНТЕКСТ И РЕЗУЛЬТАТЫ ДЛЯ РЕФЛЕКСИИ:**
 ---
-{json.dumps(world_model_context, ensure_ascii=False, indent=2)}
+{json.dumps(reflection_context, ensure_ascii=False, indent=2)}
+
 ---
 
 **ТВОЙ МЫСЛИТЕЛЬНЫЙ ПРОЦЕСС:**
-1.  **Проанализируй проваленные задачи (status: FAILED):** В чем причина? Критична ли потеря этой информации?
+1.  **Проанализируй `last_phase_summary`:** Что говорят итоги последней фазы?
+1.5.  **Проанализируй проваленные задачи (status: FAILED):** В чем причина? Критична ли потеря этой информации?
 2.  **Оцени полноту Базы Знаний:** Достаточно ли собранных "Утверждений" для достижения целей завершенной фазы? Какие главные инсайты мы получили?
 3.  **Сформулируй выводы:** Напиши 3-4 абзаца с ключевыми выводами и определи, готова ли команда переходить к следующей фазе или нужно провести дополнительное исследование.
 
