@@ -1,6 +1,7 @@
 # main.py
 import json
 import os
+import sys
 import time 
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -149,7 +150,7 @@ def main():
         serper_api_key=os.getenv("SERPAPI_API_KEY"),
         cache_dir=world_model.cache_dir
     )
-    
+
     daily_limits = {
         "models/gemini-2.5-pro": 100,
         "models/gemini-2.5-flash": 250,
@@ -163,7 +164,7 @@ def main():
     budget_manager = APIBudgetManager(world_model.output_dir, daily_limits)
 
     expert_team = ExpertTeam(llms, search_agent, budget_manager)
-    strategist = ChiefStrategist(llm=llms["strategist"], sanitizer_llm=llms["source_auditor"], budget_manager=budget_manager)
+    strategist = ChiefStrategist(llm=llms["strategist"], medium_llm=llms["expert_flash"], sanitizer_llm=llms["source_auditor"], budget_manager=budget_manager)
     
     # --- ЗАПУСК РАБОТЫ ---
     print("\n--- ЗАПУСК ОСНОВНОГО ЦИКЛА ОРКЕСТРАТОРА ---")
@@ -257,7 +258,7 @@ def main():
             print(f"   -> Задача '{task_id}' остается в статусе PENDING.")
             print(f"   -> Ошибка: {e}")
             # Завершаем работу, так как дневной лимит исчерпан
-            break
+            sys.exit(1)
 
         except Exception as e:
             print(f"!!! ОРКЕСТРАТОР: Произошла НЕПРЕДВИДЕННАЯ критическая ошибка при выполнении задачи {task_id}. Задача провалена. Ошибка: {e}")
@@ -272,29 +273,29 @@ def main():
 
     # --- Генерация и валидация Executive Summary ---
     summary_content = ""
-    for i in range(MAX_VALIDATION_RETRIES):
-        print(f"\n   -> Попытка {i+1}/{MAX_VALIDATION_RETRIES} генерации Executive Summary...")
-        feedback = summary_content # Используем предыдущий неудачный результат как фидбэк
-        
-        # Генерируем черновик
-        draft_summary = strategist.write_executive_summary(world_model, feedback=feedback)
-        
-        # Валидируем черновик
-        validation_report = strategist.validate_artifact(
-        llms['expert_flash'], # <--- ДОБАВЛЕНО
-        draft_summary, 
-        required_sections=["Executive Summary", "Концепция Продукта", "Дорожная Карта"]
-        )
-        
-        if validation_report.get("is_valid"):
-            summary_content = draft_summary
-            print("   -> Executive Summary успешно сгенерирован и прошел валидацию.")
-            break # Выходим из цикла, если все хорошо
-        else:
-            # Сохраняем причины провала для следующей итерации
-            summary_content = f"Validation failed. Reasons: {validation_report.get('reasons', [])}"
-            print(f"   !!! Попытка {i+1} провалена. Отправляю на доработку...")
-            time.sleep(10) # Небольшая пауза перед повторной попыткой
+    try:
+        for i in range(MAX_VALIDATION_RETRIES):
+            print(f"\n   -> Попытка {i+1}/{MAX_VALIDATION_RETRIES} генерации Executive Summary...")
+            feedback = summary_content # Используем предыдущий неудачный результат как фидбэк
+            # Генерируем черновик
+            draft_summary = strategist.write_executive_summary(world_model, feedback=feedback)
+            # Валидируем черновик
+            validation_report = strategist.validate_artifact(
+                llms['expert_flash'],
+                draft_summary,
+                required_sections=["Executive Summary", "Концепция Продукта", "Дорожная Карта"]
+            )
+            if validation_report.get("is_valid"):
+                summary_content = draft_summary
+                print("   -> Executive Summary успешно сгенерирован и прошел валидацию.")
+                break
+            else:
+                summary_content = f"Validation failed. Reasons: {validation_report.get('reasons', [])}"
+                print(f"   !!! Попытка {i+1} провалена. Отправляю на доработку...")
+                time.sleep(10)
+    except ResourceExhausted as e:
+        print("!!! ОШИБКА БЮДЖЕТА: Не удалось сгенерировать Executive Summary из-за исчерпания лимита API.")
+        summary_content = f"Validation failed. Reason: {e}"
 
     # Сохраняем результат (успешный или отчет об ошибке)
     summary_file_path = os.path.join(world_model.output_dir, "Executive_Summary_For_Director.md")
@@ -309,23 +310,27 @@ def main():
 
     # --- Генерация и валидация Extended Brief (аналогичный цикл) ---
     brief_content = ""
-    for i in range(MAX_VALIDATION_RETRIES):
-        print(f"\n   -> Попытка {i+1}/{MAX_VALIDATION_RETRIES} генерации Extended Brief...")
-        feedback = brief_content
-        draft_brief = strategist.write_extended_brief(world_model, feedback=feedback)
-        validation_report = strategist.validate_artifact(
-        llms['expert_flash'], # <--- ДОБАВЛЕНО
-        draft_brief,
-        required_sections=["Анализ Активов ТГУ", "Конкурентный Ландшафт", "Бизнес-Кейс"]
-        )
-        if validation_report.get("is_valid"):
-            brief_content = draft_brief
-            print("   -> Extended Brief успешно сгенерирован и прошел валидацию.")
-            break
-        else:
-            brief_content = f"Validation failed. Reasons: {validation_report.get('reasons', [])}"
-            print(f"   !!! Попытка {i+1} провалена. Отправляю на доработку...")
-            time.sleep(10)
+    try:
+        for i in range(MAX_VALIDATION_RETRIES):
+            print(f"\n   -> Попытка {i+1}/{MAX_VALIDATION_RETRIES} генерации Extended Brief...")
+            feedback = brief_content
+            draft_brief = strategist.write_extended_brief(world_model, feedback=feedback)
+            validation_report = strategist.validate_artifact(
+                llms['expert_flash'],
+                draft_brief,
+                required_sections=["Анализ Активов ТГУ", "Конкурентный Ландшафт", "Бизнес-Кейс"]
+            )
+            if validation_report.get("is_valid"):
+                brief_content = draft_brief
+                print("   -> Extended Brief успешно сгенерирован и прошел валидацию.")
+                break
+            else:
+                brief_content = f"Validation failed. Reasons: {validation_report.get('reasons', [])}"
+                print(f"   !!! Попытка {i+1} провалена. Отправляю на доработку...")
+                time.sleep(10)
+    except ResourceExhausted as e:
+        print("!!! ОШИБКА БЮДЖЕТА: Не удалось сгенерировать Extended Brief из-за исчерпания лимита API.")
+        brief_content = f"Validation failed. Reason: {e}"
 
     brief_file_path = os.path.join(world_model.output_dir, "Extended_Brief_For_PO.md")
     if brief_content and "Validation failed" not in brief_content:

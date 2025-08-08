@@ -70,7 +70,11 @@ class SemanticIndex:
             similar_ids = [self.id_map[i] for i in indices[0]]
             return similar_ids
         except Exception as e:
-            print(f"!!! ОШИБКА [SemanticIndex]: Не удалось выполнить поиск. Ошибка: {e}")
+            import traceback
+            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА [SemanticIndex]: Не удалось выполнить поиск по запросу '{query_text}'.")
+            print(f"   -> Тип ошибки: {type(e).__name__}")
+            print(f"   -> Сообщение: {e}")
+            print(f"   -> Traceback:\n{traceback.format_exc()}")
             return []
 
     def rebuild_from_kb(self, knowledge_base: dict, index_path: str, id_map_path: str):

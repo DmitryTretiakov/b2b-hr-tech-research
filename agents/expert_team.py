@@ -98,6 +98,42 @@ SOURCE_TRUST_MULTIPLIERS = {
 }
 
 class ExpertTeam:
+    def _get_llm_for_task(self, task_type: str) -> ChatGoogleGenerativeAI:
+        """Единый диспетчер моделей для разных типов задач."""
+        if task_type == 'NLI':
+            gemma_model_name = "models/gemma-3-27b-it"
+            if self.budget_manager.can_i_spend(gemma_model_name):
+                return self.llms["source_auditor"]
+            flash_lite_model_name = "models/gemini-2.5-flash-lite"
+            if self.budget_manager.can_i_spend(flash_lite_model_name):
+                return self.llms["expert_lite"]
+            raise ResourceExhausted("All models suitable for NLI have reached their daily budget limit.")
+        elif task_type == 'AUDIT':
+            flash_model_name = "models/gemini-2.5-flash"
+            if self.budget_manager.can_i_spend(flash_model_name):
+                return self.llms["expert_flash"]
+            gemma_model_name = "models/gemma-3-27b-it"
+            if self.budget_manager.can_i_spend(gemma_model_name):
+                return self.llms["source_auditor"]
+            raise ResourceExhausted("All models for AUDIT have reached their daily budget limit.")
+        elif task_type == 'ROUTINE':
+            lite_model_name = "models/gemini-2.5-flash-lite"
+            if self.budget_manager.can_i_spend(lite_model_name):
+                return self.llms["expert_lite"]
+            flash_model_name = "models/gemini-2.5-flash"
+            if self.budget_manager.can_i_spend(flash_model_name):
+                return self.llms["expert_flash"]
+            gemma_model_name = "models/gemma-3-27b-it"
+            if self.budget_manager.can_i_spend(gemma_model_name):
+                return self.llms["source_auditor"]
+            raise ResourceExhausted("All models for ROUTINE have reached their daily budget limit.")
+        elif task_type == 'SPECIALIST':
+            gemma_model_name = "models/gemma-3-27b-it"
+            if self.budget_manager.can_i_spend(gemma_model_name):
+                return self.llms["source_auditor"]
+            raise ResourceExhausted("All models for SPECIALIST have reached their daily budget limit.")
+        else:
+            raise ValueError(f"Unknown task type: {task_type}")
     """
     Управляет командой экспертов. Получает задачу и ОБЩИЙ КОНТЕКСТ,
     проводит исследование, аудит и возвращает список верифицированных "Утверждений".
@@ -152,11 +188,7 @@ class ExpertTeam:
             return
 
         # --- 2. Инициализация Gemma для этой задачи ---
-        arbiter_llm = ChatGoogleGenerativeAI(
-            model="models/gemma-3-27b-it",
-            google_api_key=os.getenv("GOOGLE_API_KEY"),
-            temperature=0.1
-        )
+        arbiter_llm = self._get_llm_for_task('SPECIALIST')
 
         # --- 3. Шаг 1 ReAct: Генерация поискового запроса ---
         prompt_step1 = f"""**ТВОЯ РОЛЬ:** AI-Арбитр, решающий конфликты.
@@ -244,7 +276,7 @@ class ExpertTeam:
             
         print(f"      [Пакетный Аудитор] -> Классифицирую {len(urls)} уникальных URL одним запросом...")
         # Используем быструю и дешевую модель для этой задачи
-        auditor_llm = self.llms["source_auditor"] 
+        auditor_llm = self._get_llm_for_task('ROUTINE')
         
         # Формируем описание типов и список URL для промпта
         source_types_list = list(SOURCE_TRUST_MULTIPLIERS.keys())
@@ -293,7 +325,7 @@ class ExpertTeam:
             return []
 
         print(f"      [Пакетный NLI Аудитор] -> Сравниваю '{new_claim['claim_id']}' с {len(existing_claims)} кандидатами...")
-        llm_for_nli = self._get_llm_for_nli()
+        llm_for_nli = self._get_llm_for_task('NLI')
 
         # Формируем текст существующих утверждений для промпта
         existing_claims_text = "\n".join(
@@ -474,7 +506,7 @@ class ExpertTeam:
 **ТВОЯ ЗАДАЧА:**
 Сгенерируй от 4 до 6 максимально конкретных и разнообразных поисковых запросов на русском языке, которые помогут эксперту найти ДОКАЗАТЕЛЬСТВА и ФАКТЫ для выполнения его задачи.
 Ты ОБЯЗАН вернуть результат в формате JSON, соответствующем предоставленной схеме."""
-        llm = self._get_llm_for_expert(assignee)
+        llm = self._get_llm_for_task('ROUTINE')
         queries = invoke_llm_for_json_with_retry(
             main_llm=llm,
             sanitizer_llm=self.llms['expert_lite'],
@@ -504,7 +536,7 @@ class ExpertTeam:
 ---
 {search_results}
 ---"""
-        llm = self._get_llm_for_expert(assignee)
+        llm = self._get_llm_for_task('ROUTINE')
         claims = invoke_llm_for_json_with_retry(
             main_llm=llm,
             sanitizer_llm=self.llms['expert_lite'],
@@ -532,7 +564,7 @@ class ExpertTeam:
 {json.dumps(claims, ensure_ascii=False, indent=2)}
 ---
 Ты ОБЯЗАН вернуть результат в формате JSON, соответствующем предоставленной схеме."""
-        auditor_llm = self.llms["expert_flash"] # Аудитор всегда "умный"
+        auditor_llm = self._get_llm_for_task('AUDIT')
         vulnerabilities = invoke_llm_for_json_with_retry(
             main_llm=auditor_llm,
             sanitizer_llm=self.llms['expert_lite'],
@@ -568,7 +600,7 @@ class ExpertTeam:
 {json.dumps(vulnerabilities, ensure_ascii=False, indent=2)}
 ---
 Ты ОБЯЗАН вернуть результат в формате JSON, соответствующем предоставленной схеме. Все утверждения должны иметь статус 'UNVERIFIED'."""
-        llm = self._get_llm_for_expert(assignee)
+        llm = self._get_llm_for_task('ROUTINE')
         final_claims_dict = invoke_llm_for_json_with_retry(
             main_llm=llm,
             sanitizer_llm=self.llms['expert_lite'],
@@ -592,7 +624,7 @@ class ExpertTeam:
         """Генерирует финансовую модель, используя Gemma."""
         print(f"   [FinancialModelAgent] -> Приступаю к задаче: {task['description']}")
         
-        arbiter_llm = ChatGoogleGenerativeAI(model="models/gemma-3-27b-it", google_api_key=os.getenv("GOOGLE_API_KEY"), temperature=0.2)
+        arbiter_llm = self._get_llm_for_task('SPECIALIST')
         
         # Используем RAG, чтобы дать агенту только релевантные факты
         relevant_claims = world_model.semantic_index.find_similar_claim_ids(task['description'], top_k=50)
@@ -637,7 +669,7 @@ class ExpertTeam:
         """Генерирует продуктовый бриф, используя Gemma."""
         print(f"   [ProductManagerAgent] -> Приступаю к задаче: {task['description']}")
         
-        arbiter_llm = ChatGoogleGenerativeAI(model="models/gemma-3-27b-it", google_api_key=os.getenv("GOOGLE_API_KEY"), temperature=0.3)
+        arbiter_llm = self._get_llm_for_task('SPECIALIST')
         
         relevant_claims = world_model.semantic_index.find_similar_claim_ids(task['description'], top_k=70)
         kb = world_model.get_full_context()['dynamic_knowledge']['knowledge_base']

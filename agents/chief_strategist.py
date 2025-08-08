@@ -60,11 +60,12 @@ class ChiefStrategist:
     "Мозг" системы. Создает план, проводит рефлексию и пишет финальные отчеты.
     Работает с самой мощной моделью (gemini-pro).
     """
-    def __init__(self, llm: ChatGoogleGenerativeAI, sanitizer_llm: ChatGoogleGenerativeAI, budget_manager: APIBudgetManager):
-      self.llm = llm
-      self.sanitizer_llm = sanitizer_llm
-      self.budget_manager = budget_manager
-      print("-> ChiefStrategist (на базе gemini-pro) готов к работе. Оснащен 'санитарной' моделью.")
+    def __init__(self, llm: ChatGoogleGenerativeAI, medium_llm: ChatGoogleGenerativeAI, sanitizer_llm: ChatGoogleGenerativeAI, budget_manager: APIBudgetManager):
+        self.llm = llm
+        self.medium_llm = medium_llm  # <--- ДОБАВЛЕНО
+        self.sanitizer_llm = sanitizer_llm
+        self.budget_manager = budget_manager
+        print("-> ChiefStrategist (на базе gemini-pro) готов к работе. Оснащен 'санитарной' моделью и средней моделью.")
 
     
         
@@ -77,7 +78,53 @@ class ChiefStrategist:
         Теперь использует пакетную обработку.
         """
         return self._batch_filter_kb_by_relevance(knowledge_base)
+    def _get_llm_for_task(self, task_type: Literal['ROUTINE', 'NLI', 'AUDIT', 'SPECIALIST']) -> ChatGoogleGenerativeAI:
+        """
+        Единый диспетчер моделей. Выбирает LLM на основе типа задачи и доступного бюджета.
+        """
+        # --- Эшелон 3: Стратегическое оружие (не используется экспертами) ---
+        # pro_model_name = "models/gemini-2.5-pro"
 
+        # --- Эшелон 2: Модели для качественного анализа ---
+        flash_model_name = "models/gemini-2.5-flash"
+        
+        # --- Эшелон 1: Рабочие лошадки и резерв ---
+        lite_model_name = "models/gemini-2.5-flash-lite"
+        gemma_model_name = "models/gemma-3-27b-it"
+
+        # Логика для задачи NLI (требует высокого качества)
+        if task_type == 'NLI':
+            if self.budget_manager.can_i_spend(flash_model_name):
+                print(f"   [Диспетчер NLI] Использую основную модель: {flash_model_name}")
+                return self.llms["expert_flash"]
+            print(f"!!! ВНИМАНИЕ: [Диспетчер NLI] Бюджет для {flash_model_name} исчерпан. Переключаюсь на резерв {gemma_model_name}.")
+            if self.budget_manager.can_i_spend(gemma_model_name):
+                return self.llms["source_auditor"]
+
+        # Логика для задачи Аудита (требует среднего качества)
+        if task_type == 'AUDIT':
+            if self.budget_manager.can_i_spend(flash_model_name):
+                print(f"   [Диспетчер Аудита] Использую основную модель: {flash_model_name}")
+                return self.llms["expert_flash"]
+            print(f"!!! [Диспетчер Аудита] Бюджет для {flash_model_name} исчерпан. Переключаюсь на резерв {gemma_model_name}.")
+            if self.budget_manager.can_i_spend(gemma_model_name):
+                return self.llms["source_auditor"]
+
+        # Логика для рутинных и специализированных задач (приоритет на дешевизну)
+        if task_type in ['ROUTINE', 'SPECIALIST']:
+            if self.budget_manager.can_i_spend(lite_model_name):
+                print(f"   [Диспетчер Рутины] Использую основную модель: {lite_model_name}")
+                return self.llms.get("expert_lite")
+            if self.budget_manager.can_i_spend(flash_model_name):
+                print(f"   [Диспетчер Рутины] Лимит для {lite_model_name} исчерпан. Использую {flash_model_name}.")
+                return self.llms.get("expert_flash")
+            print(f"!!! [Диспетчер Рутины] Лимиты для Flash-моделей исчерпаны. Переключаюсь на резерв {gemma_model_name}.")
+            if self.budget_manager.can_i_spend(gemma_model_name):
+                return self.llms.get("source_auditor")
+
+        # Полный провал, если ни одна модель не подошла
+        print(f"!!! КРИТИЧЕСКИЙ СБОЙ: Для задачи типа '{task_type}' не найдено доступных моделей.")
+        raise ResourceExhausted(f"All models for task type {task_type} have reached their daily budget limit.")
 
     def _invoke_llm_for_text(self, prompt: str) -> str:
       """Простой вызов LLM для генерации текста с контролем бюджета."""
@@ -408,20 +455,11 @@ class ChiefStrategist:
         if not knowledge_base:
             return {}
 
-        # --- ИЗМЕНЕНИЕ: Инициализируем нужную модель прямо здесь ---
-        # Это позволяет нам использовать быструю модель для этой задачи, не меняя основную модель Стратега.
-        filter_llm = ChatGoogleGenerativeAI(
-            model="models/gemini-2.5-flash",
-            google_api_key=os.getenv("GOOGLE_API_KEY"),
-            temperature=0.0 # Нулевая температура для задач классификации
-        )
-        # ---------------------------------------------------------
-
         claims_for_analysis = []
         for claim_id, claim in knowledge_base.items():
             if claim.get('status') != 'CONFLICTED':
                 claims_for_analysis.append(f"ID: {claim_id}, Утверждение: '{claim['statement']}' (Значение: {claim['value']})")
-        
+
         claims_text = "\n".join(claims_for_analysis)
 
         prompt = f"""**КОНТЕКСТ:** Мы готовим бизнес-кейс для создания нового B2B HR-Tech продукта.
@@ -440,9 +478,9 @@ class ChiefStrategist:
 
 **ИНСТРУКЦИЯ:** Верни JSON-объект, содержащий поле `relevant_claim_ids`. Это должен быть список, содержащий ТОЛЬКО ID тех утверждений, которые напрямую помогают ответить **хотя бы на один** из четырех бизнес-вопросов.
 """
-        
+
         report = invoke_llm_for_json_with_retry(
-            main_llm=filter_llm,             # Основная модель - быстрая filter_llm
+            main_llm=self.medium_llm,             # Используем среднюю модель
             sanitizer_llm=self.sanitizer_llm, # Резервная модель - из self.sanitizer_llm
             prompt=prompt,
             pydantic_schema=BatchRelevanceReport,
