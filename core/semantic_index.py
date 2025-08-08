@@ -4,25 +4,24 @@ import numpy as np
 import json
 import os
 import traceback
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from core.budget_manager import APIBudgetManager
 from google.api_core.exceptions import ResourceExhausted
+import google.generativeai as genai
+from core.embedding_client import GeminiEmbeddingClient
 
 class SemanticIndex:
-    def __init__(self, embedding_model: GoogleGenerativeAIEmbeddings, budget_manager: APIBudgetManager, save_every_n: int = 10):
-        self.embedding_model = embedding_model
+    def __init__(self, embedding_client: GeminiEmbeddingClient, budget_manager: APIBudgetManager, save_every_n: int = 10):
+        self.embedding_model = embedding_client 
         self.budget_manager = budget_manager
         
-        # --- ДИНАМИЧЕСКОЕ ОПРЕДЕЛЕНИЕ РАЗМЕРНОСТИ ---
         try:
-            print("   [SemanticIndex] Определяю размерность векторов модели эмбеддингов...")
-            self.dimension = self._get_embedding_dimension()
+            print("   [SemanticIndex] Определяю размерность векторов...")
+            self.dimension = self.embedding_client.get_embedding_dimension() # <-- ИЗМЕНЕНО
             print(f"   [SemanticIndex] Размерность определена: {self.dimension}")
         except Exception as e:
             print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось определить размерность модели. Использую значение по умолчанию 768. Ошибка: {e}")
-            self.dimension = 768 # Отказоустойчивое значение по умолчанию
-        # --- КОНЕЦ ДИНАМИЧЕСКОГО ОПРЕДЕЛЕНИЯ ---
-
+            self.dimension = 768
+        
         self.index = faiss.IndexFlatL2(self.dimension)
         self.id_map = []
         self.save_every_n = save_every_n
@@ -30,16 +29,47 @@ class SemanticIndex:
         print(f"-> SemanticIndex (FAISS) инициализирован с динамически определенной размерностью {self.dimension}.")
 
     def _get_embedding_dimension(self) -> int:
-        """Делает один тестовый запрос для определения размерности векторов."""
-        model_name = self.embedding_model.model
-        if not self.budget_manager.can_i_spend(model_name):
-            raise ResourceExhausted("Невозможно определить размерность, так как лимит API эмбеддингов исчерпан.")
-        
-        # Используем простой текст, который гарантированно не вызовет проблем с безопасностью
-        test_vector = self.embedding_model.embed_query("test")
-        self.budget_manager.record_spend(model_name) # Мы потратили один вызов, его нужно учесть
-        return len(test_vector)
+        """
+        Делает один прямой вызов через официальную библиотеку google-generativeai,
+        чтобы гарантированно и явно задать параметры и определить размерность.
+        """
+        model_name_str = self.embedding_model.model
+        if not self.budget_manager.can_i_spend(model_name_str):
+            raise ResourceExhausted("Невозможно определить размерность, лимит API эмбеддингов исчерпан.")
 
+        try:
+            print("   [SemanticIndex] Выполняю прямой вызов API для определения размерности...")
+            
+            # --- НАЧАЛО ФИНАЛЬНОГО ИСПРАВЛЕНИЯ ---
+            # Получаем API ключ из окружения, как это делает вся система
+            api_key = os.getenv("GOOGLE_API_KEY")
+            if not api_key:
+                raise ValueError("GOOGLE_API_KEY не найден в окружении.")
+
+            # Создаем и конфигурируем наш собственный, чистый клиент
+            genai.configure(api_key=api_key)
+            
+            # Формируем правильный путь к модели
+            model_path = f"models/{model_name_str.split('/')[-1]}"
+
+            # Выполняем вызов, как в официальной документации
+            result = genai.embed_content(
+                model=model_path,
+                content="test",
+                task_type="RETRIEVAL_DOCUMENT",
+                output_dimensionality=768
+            )
+            # --- КОНЕЦ ФИНАЛЬНОГО ИСПРАВЛЕНИЯ ---
+            
+            self.budget_manager.record_spend(model_name_str)
+            return len(result['embedding'])
+            
+        except Exception as e:
+            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА [SemanticIndex]: Прямой вызов API для определения размерности не удался: {e}")
+            print("!!! СИСТЕМА НЕ МОЖЕТ ПРОДОЛЖАТЬ РАБОТУ В НЕОПРЕДЕЛЕННОМ СОСТОЯНИИ. АВАРИЙНОЕ ЗАВЕРШЕНИЕ.")
+            # Мы больше не пытаемся угадать. Если мы не можем контролировать размерность, система должна остановиться.
+            raise e
+        
     def save_to_disk(self, index_path: str, id_map_path: str):
         """Сохраняет индекс FAISS и карту ID на диск."""
         print(f"   [SemanticIndex] -> Сохраняю индекс ({self.index.ntotal} векторов) на диск...")
@@ -78,7 +108,7 @@ class SemanticIndex:
             model_name = self.embedding_model.model
             if not self.budget_manager.can_i_spend(model_name):
                 raise ResourceExhausted(f"Daily budget for embedding model {model_name} reached.")
-            vector = self.embedding_model.embed_query(claim_text)
+            vector = self.embedding_client.embed_document(claim_text)
             self.budget_manager.record_spend(model_name)
             vector_np = np.array([vector], dtype=np.float32)
             self.index.add(vector_np)
@@ -100,7 +130,7 @@ class SemanticIndex:
             model_name = self.embedding_model.model
             if not self.budget_manager.can_i_spend(model_name):
                 raise ResourceExhausted(f"Daily budget for embedding model {model_name} reached.")
-            query_vector = self.embedding_model.embed_query(query_text)
+            query_vector = self.embedding_client.embed_query(query_text)
             self.budget_manager.record_spend(model_name)
             query_vector_np = np.array([query_vector], dtype=np.float32)
             distances, indices = self.index.search(query_vector_np, k=min(top_k, self.index.ntotal))

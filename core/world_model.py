@@ -2,9 +2,9 @@
 import json
 import os
 from datetime import datetime
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from core.semantic_index import SemanticIndex
 from core.budget_manager import APIBudgetManager
+from core.embedding_client import GeminiEmbeddingClient
 
 class WorldModel:
     """
@@ -34,16 +34,11 @@ class WorldModel:
         os.makedirs(self.log_dir, exist_ok=True)
         os.makedirs(self.cache_dir, exist_ok=True)
 
-        # --- ИСПРАВЛЕННАЯ И ЕДИНСТВЕННАЯ ИНИЦИАЛИЗАЦИЯ ИНДЕКСА ---
-        embedding_model = GoogleGenerativeAIEmbeddings(
-            model="models/gemini-embedding-001",
-            output_dimensionality=768  # <-- ЯВНОЕ УКАЗАНИЕ РЕКОМЕНДОВАННОЙ РАЗМЕРНОСТИ
-        )
+        embedding_client = GeminiEmbeddingClient(budget_manager=budget_manager)
         
-        # 2. Затем создаем SemanticIndex, ПЕРЕДАВАЯ ему budget_manager
         self.semantic_index = SemanticIndex(
-            embedding_model=embedding_model,
-            budget_manager=budget_manager 
+            embedding_client=embedding_client, # <-- ПЕРЕДАЕМ НАШ КЛИЕНТ
+            budget_manager=budget_manager
         )
 
         # Инициализируем пустое состояние по умолчанию
