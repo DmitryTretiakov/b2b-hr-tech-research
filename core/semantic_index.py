@@ -8,6 +8,7 @@ import google.generativeai as genai
 from core.budget_manager import APIBudgetManager
 from google.api_core.exceptions import ResourceExhausted
 from core.embedding_client import GeminiEmbeddingClient
+from typing import Tuple
 
 class SemanticIndex:
     def __init__(self, embedding_client: GeminiEmbeddingClient, budget_manager: APIBudgetManager, save_every_n: int = 10):
@@ -28,15 +29,27 @@ class SemanticIndex:
         self._add_counter = 0
         print(f"-> SemanticIndex (FAISS) инициализирован с динамически определенной размерностью {self.dimension}.")
 
-    def save_to_disk(self, index_path: str, id_map_path: str):
-        print(f"   [SemanticIndex] -> Сохраняю индекс ({self.index.ntotal} векторов) на диск...")
+    def save_to_disk(self, index_path: str, id_map_path: str) -> Tuple[str, str]:
+        """
+        Выполняет "подготовительную" фазу сохранения: записывает индекс и карту ID
+        во временные файлы и возвращает их пути.
+        Не выполняет финальное переименование.
+        """
+        tmp_index_path = index_path + ".tmp"
+        tmp_id_map_path = id_map_path + ".tmp"
+        
+        print(f"   [SemanticIndex] -> Подготовка к сохранению индекса во временные файлы...")
         try:
-            faiss.write_index(self.index, index_path)
-            with open(id_map_path, 'w', encoding='utf-8') as f:
+            faiss.write_index(self.index, tmp_index_path)
+            with open(tmp_id_map_path, 'w', encoding='utf-8') as f:
                 json.dump(self.id_map, f)
-            print("   [SemanticIndex] <- Индекс и карта ID успешно сохранены.")
+            print(f"   [SemanticIndex] <- Временные файлы индекса '{tmp_index_path}' и '{tmp_id_map_path}' созданы.")
+            return tmp_index_path, tmp_id_map_path
         except Exception as e:
-            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА [SemanticIndex]: Не удалось сохранить индекс. Ошибка: {e}")
+            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА [SemanticIndex]: Не удалось записать временные файлы индекса. Ошибка: {e}")
+            if os.path.exists(tmp_index_path): os.remove(tmp_index_path)
+            if os.path.exists(tmp_id_map_path): os.remove(tmp_id_map_path)
+            raise e
 
     def load_from_disk(self, index_path: str, id_map_path: str) -> bool:
         if os.path.exists(index_path) and os.path.exists(id_map_path):

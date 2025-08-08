@@ -23,6 +23,8 @@ class WorldModel:
         self.index_path = os.path.join(self.output_dir, "faiss.index")
         self.id_map_path = os.path.join(self.output_dir, "id_map.json")
 
+        self._cleanup_temp_files()
+
         # Обрабатываем флаг --fresh-start, удаляя все старые данные
         if force_fresh_start:
             print("!!! [WorldModel] Активирован режим 'fresh-start'. Удаляю старые файлы состояния и индекса.")
@@ -97,28 +99,58 @@ class WorldModel:
     
     # --- НОВЫЙ ПРИВАТНЫЙ МЕТОД ДЛЯ СОХРАНЕНИЯ ---
     def _save_state_to_disk(self):
-        """Сохраняет полный объект dynamic_knowledge в JSON-файл."""
-        print("   [WorldModel] -> Сохраняю текущее состояние на диск...")
-        try:
-            with open(self.state_file_path, "w", encoding="utf-8") as f:
-                json.dump(self.dynamic_knowledge, f, ensure_ascii=False, indent=2)
-            print("   [WorldModel] <- Состояние успешно сохранено.")
-        except Exception as e:
-            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА [WorldModel]: Не удалось сохранить состояние в {self.state_file_path}. Ошибка: {e}")
+        """
+        Атомарно сохраняет полное состояние системы (state + index) через
+        двухфазную запись во временные файлы. Гарантирует консистентность.
+        """
+        print("   [WorldModel] -> Начало атомарной транзакции сохранения...")
+        
+        # Определяем пути к временным файлам
+        tmp_state_path = self.state_file_path + ".tmp"
+        tmp_files = [tmp_state_path]
 
-    # --- НОВЫЙ ПРИВАТНЫЙ МЕТОД ДЛЯ ЗАГРУЗКИ ---
-    def _load_state_from_disk(self):
-        """Загружает состояние из JSON-файла, если он существует."""
-        if os.path.exists(self.state_file_path):
-            print(f"   [WorldModel] -> Найден файл состояния {self.state_file_path}. Загружаю...")
-            try:
-                with open(self.state_file_path, "r", encoding="utf-8") as f:
-                    self.dynamic_knowledge = json.load(f)
-                print("   [WorldModel] <- Состояние успешно загружено.")
-            except (json.JSONDecodeError, FileNotFoundError) as e:
-                print(f"!!! ВНИМАНИЕ [WorldModel]: Не удалось загрузить состояние из файла. Будет использовано пустое состояние. Ошибка: {e}")
-        else:
-            print("   [WorldModel] Файл состояния не найден. Используется пустое состояние по умолчанию.")
+        try:
+            # --- ФАЗА 1: ПОДГОТОВКА И ЗАПИСЬ ВО ВРЕМЕННЫЕ ФАЙЛЫ ---
+
+            # 1. Готовим и записываем индекс
+            tmp_index_path, tmp_id_map_path = self.semantic_index.save_to_disk(self.index_path, self.id_map_path)
+            tmp_files.extend([tmp_index_path, tmp_id_map_path])
+
+            # 2. Готовим и записываем основное состояние
+            with open(tmp_state_path, "w", encoding="utf-8") as f:
+                json.dump(self.dynamic_knowledge, f, ensure_ascii=False, indent=2)
+            
+            # --- ФАЗА 2: АТОМАРНЫЙ КОММИТ (ПЕРЕИМЕНОВАНИЕ) ---
+            # Эта фаза выполняется только если в Фазе 1 не было исключений
+            
+            print("   [WorldModel] -> Коммит транзакции...")
+            os.rename(tmp_index_path, self.index_path)
+            os.rename(tmp_id_map_path, self.id_map_path)
+            os.rename(tmp_state_path, self.state_file_path)
+            
+            print("   [WorldModel] <- Транзакция успешно завершена. Состояние сохранено.")
+
+        except Exception as e:
+            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА [WorldModel]: Транзакция сохранения провалена. Ошибка: {e}. Выполняю откат...")
+            # Откат не нужен, так как finally блок сделает всю работу по очистке
+            raise e # Перевыбрасываем ошибку, чтобы система знала о сбое
+        
+        finally:
+            # --- ОЧИСТКА ---
+            # Этот блок выполнится ВСЕГДА, даже если была ошибка.
+            # Он удалит все временные файлы, которые не были успешно переименованы.
+            for tmp_path in tmp_files:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+
+    def _cleanup_temp_files(self):
+        """Удаляет все временные файлы сохранения, оставшиеся от предыдущих сбоев."""
+        print("   [WorldModel] Проверка на наличие временных файлов от предыдущих сессий...")
+        for path in [self.state_file_path, self.index_path, self.id_map_path]:
+            tmp_path = path + ".tmp"
+            if os.path.exists(tmp_path):
+                print(f"      -> Найден и удален временный файл: {tmp_path}")
+                os.remove(tmp_path)
 
     def update_strategic_plan(self, plan: dict):
         """Обновляет или заменяет стратегический план и СОХРАНЯЕТ СОСТОЯНИЕ."""
