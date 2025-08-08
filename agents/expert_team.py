@@ -101,12 +101,16 @@ class ExpertTeam:
     def _get_llm_for_task(self, task_type: str) -> ChatGoogleGenerativeAI:
         """Единый диспетчер моделей для разных типов задач."""
         if task_type == 'NLI':
+            flash_model_name = "models/gemini-2.5-flash"
+            if self.budget_manager.can_i_spend(flash_model_name):
+                print(f"   [Диспетчер NLI] Использую основную модель: {flash_model_name}")
+                return self.llms["expert_flash"]
+
             gemma_model_name = "models/gemma-3-27b-it"
+            print(f"!!! ВНИМАНИЕ: [Диспетчер NLI] Бюджет для {flash_model_name} исчерпан. Переключаюсь на резерв {gemma_model_name}.")
             if self.budget_manager.can_i_spend(gemma_model_name):
                 return self.llms["source_auditor"]
-            flash_lite_model_name = "models/gemini-2.5-flash-lite"
-            if self.budget_manager.can_i_spend(flash_lite_model_name):
-                return self.llms["expert_lite"]
+
             raise ResourceExhausted("All models suitable for NLI have reached their daily budget limit.")
         elif task_type == 'AUDIT':
             flash_model_name = "models/gemini-2.5-flash"
@@ -134,38 +138,11 @@ class ExpertTeam:
             raise ResourceExhausted("All models for SPECIALIST have reached their daily budget limit.")
         else:
             raise ValueError(f"Unknown task type: {task_type}")
-    """
-    Управляет командой экспертов. Получает задачу и ОБЩИЙ КОНТЕКСТ,
-    проводит исследование, аудит и возвращает список верифицированных "Утверждений".
-    """
     def __init__(self, llms: dict, search_agent: SearchAgent, budget_manager: APIBudgetManager):
         self.llms = llms
         self.search_agent = search_agent
         self.budget_manager = budget_manager
         print("-> Команда Экспертов сформирована и использует Pydantic-парсеры.")
-
-    def _get_llm_for_expert(self, assignee: str) -> ChatGoogleGenerativeAI:
-        """Выбирает модель для рутинных экспертных задач по каскадному принципу."""
-        
-        # Эшелон 1: Рабочие лошадки
-        lite_model_name = "models/gemini-2.5-flash-lite"
-        if self.budget_manager.can_i_spend(lite_model_name):
-            return self.llms.get("expert_lite")
-
-        flash_model_name = "models/gemini-2.5-flash"
-        if self.budget_manager.can_i_spend(flash_model_name):
-            print(f"   [Диспетчер] Лимит для {lite_model_name} исчерпан. Использую {flash_model_name}.")
-            return self.llms.get("expert_flash")
-
-        # Эшелон 2: Резерв
-        gemma_model_name = "models/gemma-3-27b-it"
-        print(f"!!! [Диспетчер] Лимиты для всех Flash-моделей исчерпаны. Переключаюсь на резерв: {gemma_model_name}.")
-        if self.budget_manager.can_i_spend(gemma_model_name):
-            return self.llms.get("source_auditor") # Ваша модель Gemma
-
-        # Полный провал
-        print("!!! КРИТИЧЕСКИЙ СБОЙ: Все рабочие и резервные модели исчерпали лимит.")
-        raise ResourceExhausted("All expert models have reached their daily budget limit.")
 
     def _execute_arbitration_task(self, task: dict, world_model: WorldModel) -> None:
         """

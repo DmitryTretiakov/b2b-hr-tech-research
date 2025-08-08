@@ -220,13 +220,6 @@ class ChiefStrategist:
         Декомпозирует общую мысль на несколько сфокусированных запросов для Multi-Query RAG.
         """
         print("      [Стратег.RAG] -> Декомпозирую общую мысль на сфокусированные запросы...")
-        # Используем быструю модель для этой задачи
-        query_gen_llm = ChatGoogleGenerativeAI(
-            model="models/gemma-3-27b-it",
-            google_api_key=os.getenv("GOOGLE_API_KEY"),
-            temperature=0.0
-        )
-
         prompt = f"""**ТВОЯ ЗАДАЧА:** Ты — системный аналитик. Твоя цель — преобразовать общую аналитическую сводку в несколько конкретных, сжатых поисковых запросов для векторной базы данных.
 
 **АНАЛИТИЧЕСКАЯ СВОДКА ОТ СТРАТЕГА:**
@@ -239,15 +232,13 @@ class ChiefStrategist:
 
 Верни результат в виде ОДНОГО JSON-объекта.
 """
-        
         report = invoke_llm_for_json_with_retry(
-            main_llm=query_gen_llm,          # Основная модель - быстрая query_gen_llm
-            sanitizer_llm=self.sanitizer_llm, # Резервная модель - из self.sanitizer_llm
+            main_llm=self.sanitizer_llm,          # Используем модель из конструктора
+            sanitizer_llm=self.sanitizer_llm,
             prompt=prompt,
             pydantic_schema=RagQuerySet,
             budget_manager=self.budget_manager
         )
-
         return report
     
     def _summarize_situation(self, world_model_context: dict) -> str:
