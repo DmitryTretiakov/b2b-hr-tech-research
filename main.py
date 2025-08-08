@@ -194,6 +194,43 @@ def main():
         active_tasks = world_model.get_active_tasks()
         
         if not active_tasks:
+
+            # =================================================================
+            # --- НАЧАЛО: БЛОК ОБЯЗАТЕЛЬНОГО КОНТРАРНОГО АУДИТА (ШАГ 1) ---
+            # =================================================================
+            print("\n[Supervisor] Проверка необходимости контрарного аудита...")
+            
+            # Получаем имя последней завершенной фазы (потребуется новый метод в WorldModel)
+            completed_phase_name = world_model.get_last_completed_phase_name()
+            
+            # Проверяем, что фаза была исследовательской и в ней еще не было контрарных задач
+            is_research_phase = any(kw in completed_phase_name.lower() for kw in ["разведка", "анализ", "исследование", "конкурент"])
+            has_contrarian_task = world_model.has_task_for_assignee_in_phase(completed_phase_name, 'Contrarian_Expert')
+
+            if is_research_phase and not has_contrarian_task:
+                print(f"[Supervisor] -> Фаза '{completed_phase_name}' завершена. Запускаю обязательный контрарный аудит.")
+                
+                # 1. Получаем 2-3 самых уверенных утверждения из всей Базы Знаний
+                kb = world_model.get_full_context()['dynamic_knowledge']['knowledge_base']
+                sorted_claims = sorted(
+                    [c for c in kb.values() if c.get('status') == 'VERIFIED'], 
+                    key=lambda x: x.get('confidence_score', 0), 
+                    reverse=True
+                )
+                top_claims_to_challenge = sorted_claims[:2] # Ограничимся двумя самыми сильными
+
+                if top_claims_to_challenge:
+                    # 2. Делегируем создание задач экспертной команде
+                    contrarian_tasks = expert_team.generate_contrarian_tasks(top_claims_to_challenge)
+                    
+                    # 3. Добавляем задачи в план (в ту же завершенную фазу)
+                    if contrarian_tasks:
+                        for task in contrarian_tasks:
+                            world_model.add_task_to_plan(task, phase_name=completed_phase_name)
+                        
+                        print(f"[Supervisor] <- Добавлено {len(contrarian_tasks)} новых контрарных задач. Цикл будет перезапущен.")
+                        continue # Перезапускаем главный цикл, чтобы немедленно выполнить эти задачи
+                    
             print("\n--- Все задачи текущей фазы выполнены. Запускаю рефлексию Стратега... ---")
             
             reflection_success = False

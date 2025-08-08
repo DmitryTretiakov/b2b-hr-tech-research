@@ -258,3 +258,22 @@ class WorldModel:
             print(f"   [WorldModel] <- Артефакт также сохранен в файл {artifact_path}")
         except Exception as e:
             print(f"!!! ОШИБКА: Не удалось сохранить артефакт в отдельный файл. Ошибка: {e}")
+
+    def get_last_completed_phase_name(self) -> str:
+        """Находит имя последней по порядку фазы со статусом COMPLETED."""
+        plan = self.dynamic_knowledge.get("strategic_plan", {})
+        completed_phases = [p for p in plan.get("phases", []) if p.get("status") == "COMPLETED"]
+        if completed_phases:
+            # Возвращаем имя последней в списке завершенных фаз
+            return completed_phases[-1].get("phase_name", "unknown_phase")
+        return "initial_phase" # Если ни одна не завершена
+
+    def has_task_for_assignee_in_phase(self, phase_name: str, assignee: str) -> bool:
+        """Проверяет, есть ли в указанной фазе хотя бы одна задача для данного исполнителя."""
+        plan = self.dynamic_knowledge.get("strategic_plan", {})
+        for phase in plan.get("phases", []):
+            if phase.get("phase_name") == phase_name:
+                for task in phase.get("tasks", []):
+                    if task.get("assignee") == assignee:
+                        return True
+        return False

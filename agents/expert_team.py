@@ -784,3 +784,29 @@ class ExpertTeam:
         # Полный провал
         print("!!! КРИТИЧЕСКИЙ СБОЙ NLI: Все подходящие модели исчерпали дневной лимит.")
         raise ResourceExhausted("All models suitable for NLI have reached their daily budget limit.")
+    
+    def generate_contrarian_tasks(self, claims_to_challenge: list) -> list:
+        """
+        Детерминированно создает список задач для Contrarian_Expert на основе
+        предоставленных утверждений. Не использует LLM.
+        """
+        print(f"   [ExpertTeam] -> Создаю контрарные задачи для {len(claims_to_challenge)} утверждений...")
+        tasks = []
+        for claim in claims_to_challenge:
+            claim_id = claim.get('claim_id')
+            statement = claim.get('statement')
+            
+            task_id = f"contrarian_task_{claim_id}"
+            
+            task = {
+                "task_id": task_id,
+                "assignee": "Contrarian_Expert",
+                "description": f"Найти доказательства, которые опровергают, оспаривают или ставят под сомнение следующее утверждение: '{statement}'",
+                "goal": f"Проверить на прочность ключевое утверждение '{claim_id}' для снижения предвзятости подтверждения.",
+                "status": "PENDING",
+                "retry_count": 0
+            }
+            tasks.append(task)
+        
+        print(f"   [ExpertTeam] <- Создано {len(tasks)} контрарных задач.")
+        return tasks
