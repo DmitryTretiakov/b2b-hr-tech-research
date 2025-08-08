@@ -11,6 +11,8 @@ from agents.search_agent import SearchAgent
 from utils.helpers import format_search_results_for_llm
 
 from core.world_model import WorldModel
+from utils.helpers import invoke_llm_for_json_with_retry
+from core.budget_manager import APIBudgetManager
 
 # --- PYDANTIC СХЕМЫ ДЛЯ ЭКСПЕРТНОЙ КОМАНДЫ ---
 
@@ -100,27 +102,16 @@ class ExpertTeam:
     Управляет командой экспертов. Получает задачу и ОБЩИЙ КОНТЕКСТ,
     проводит исследование, аудит и возвращает список верифицированных "Утверждений".
     """
-    def __init__(self, llms: dict, search_agent: SearchAgent):
+    def __init__(self, llms: dict, search_agent: SearchAgent, budget_manager: APIBudgetManager):
         self.llms = llms
         self.search_agent = search_agent
+        self.budget_manager = budget_manager
         print("-> Команда Экспертов сформирована и использует Pydantic-парсеры.")
 
     def _get_llm_for_expert(self, assignee: str) -> ChatGoogleGenerativeAI:
         """Выбирает модель в зависимости от роли эксперта."""
         return self.llms.get("expert_flash", self.llms["expert_lite"])
 
-    def _invoke_llm_for_json(self, llm: ChatGoogleGenerativeAI, prompt: str, pydantic_schema: BaseModel) -> dict:
-        """Надежный метод для вызова LLM с гарантированным JSON-ответом."""
-        parser = PydanticOutputParser(pydantic_object=pydantic_schema)
-        prompt_with_format_instructions = f"{prompt}\n\n{parser.get_format_instructions()}"
-        
-        try:
-            response = llm.invoke(prompt_with_format_instructions)
-            parsed_object = parser.parse(response.content)
-            return parsed_object.model_dump()
-        except Exception as e:
-            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА LLM/Парсера в ExpertTeam: {e}")
-            return {}
     def _execute_arbitration_task(self, task: dict, world_model: WorldModel) -> None:
         """
         Выполняет задачу по разрешению конфликта между двумя утверждениями.
@@ -159,7 +150,7 @@ class ExpertTeam:
 
 Верни результат в виде JSON.
 """
-        query_report = self._invoke_llm_for_json(arbiter_llm, prompt_step1, ArbitrationSearchQuery)
+        query_report = invoke_llm_for_json_with_retry(arbiter_llm, self.llms['expert_lite'], prompt_step1, ArbitrationSearchQuery)
         if not query_report or 'query' not in query_report:
             print("   [Арбитр] !!! Не удалось сгенерировать поисковый запрос. Задача провалена.")
             world_model.update_task_status(task['task_id'], 'FAILED')
@@ -187,7 +178,7 @@ class ExpertTeam:
 2.  **Прими финальное решение:** Какое из первоначальных утверждений (А или Б) подтверждается новыми доказательствами?
 3.  **Заполни отчет** в формате JSON, указав ID победившего и проигравшего утверждения, ссылку на самый убедительный новый источник и краткое обоснование своего решения.
 """
-        final_report = self._invoke_llm_for_json(arbiter_llm, prompt_step2, ArbitrationReport)
+        final_report = invoke_llm_for_json_with_retry(arbiter_llm, self.llms['expert_lite'], prompt_step2, ArbitrationReport)
 
         # --- 5. Обновление Базы Знаний на основе вердикта ---
         if not final_report or 'winning_claim_id' not in final_report:
@@ -239,7 +230,7 @@ class ExpertTeam:
 **ИНСТРУКЦИЯ:** Верни результат в виде ОДНОГО JSON-объекта. Ключами в этом объекте должны быть предоставленные URL, а значениями — объекты с единственным полем 'source_type'. Если URL не соответствует ни одному типу или ссылка не работает, используй тип 'UNKNOWN'.
 """
         
-        report = self._invoke_llm_for_json(auditor_llm, prompt, BatchAuditReport)
+        report = invoke_llm_for_json_with_retry(auditor_llm, self.llms['expert_lite'], prompt, BatchAuditReport)
         
         processed_report = {}
         if report and 'audit_results' in report:
@@ -292,7 +283,7 @@ class ExpertTeam:
 Верни результат в виде ОДНОГО JSON-объекта, соответствующего предоставленной схеме.
 """
         
-        report = self._invoke_llm_for_json(llm, prompt, BatchNLIReport)
+        report = invoke_llm_for_json_with_retry(llm, self.llms['expert_lite'], prompt, BatchNLIReport)
         
         # --- Дросселирование ПОСЛЕ вызова. 10 RPM -> 6с/запрос ---
         # Мы все еще делаем K вызовов, поэтому оставляем защиту от всплесков.
@@ -441,7 +432,7 @@ class ExpertTeam:
 Сгенерируй от 4 до 6 максимально конкретных и разнообразных поисковых запросов на русском языке, которые помогут эксперту найти ДОКАЗАТЕЛЬСТВА и ФАКТЫ для выполнения его задачи.
 Ты ОБЯЗАН вернуть результат в формате JSON, соответствующем предоставленной схеме."""
         llm = self._get_llm_for_expert(assignee)
-        queries = self._invoke_llm_for_json(llm, prompt, SearchQueries)
+        queries = invoke_llm_for_json_with_retry(llm, self.llms['expert_lite'], prompt, SearchQueries)
         if queries.get('queries'):
             print(f"   [Эксперт {assignee}] -> Поисковые запросы сгенерированы: {queries['queries']}")
         else:
@@ -465,7 +456,7 @@ class ExpertTeam:
 {search_results}
 ---"""
         llm = self._get_llm_for_expert(assignee)
-        claims = self._invoke_llm_for_json(llm, prompt, ClaimList)
+        claims = invoke_llm_for_json_with_retry(llm, self.llms['expert_lite'], prompt, ClaimList)
         if claims.get('claims'):
             print(f"   [Эксперт {assignee}] -> Создан черновик из {len(claims['claims'])} утверждений.")
         else:
@@ -487,7 +478,7 @@ class ExpertTeam:
 ---
 Ты ОБЯЗАН вернуть результат в формате JSON, соответствующем предоставленной схеме."""
         auditor_llm = self.llms["expert_flash"] # Аудитор всегда "умный"
-        vulnerabilities = self._invoke_llm_for_json(auditor_llm, prompt, AuditReport)
+        vulnerabilities = invoke_llm_for_json_with_retry(auditor_llm, self.llms['expert_lite'], prompt, AuditReport)
         if vulnerabilities.get('vulnerabilities'):
             print(f"   [Аудитор] -> Проверка завершена.")
         else:
@@ -517,7 +508,7 @@ class ExpertTeam:
 ---
 Ты ОБЯЗАН вернуть результат в формате JSON, соответствующем предоставленной схеме. Все утверждения должны иметь статус 'UNVERIFIED'."""
         llm = self._get_llm_for_expert(assignee)
-        final_claims_dict = self._invoke_llm_for_json(llm, prompt, ClaimList)
+        final_claims_dict = invoke_llm_for_json_with_retry(llm, self.llms['expert_lite'], prompt, ClaimList)
         
         if final_claims_dict.get('claims'):
             print(f"   [Эксперт {assignee}] -> Утверждения финализированы.")
@@ -557,14 +548,8 @@ class ExpertTeam:
 5.  **Сформируй результат** в виде ОДНОГО JSON-объекта с заголовком и полной Markdown-строкой, содержащей таблицы и выводы.
 """
         report = None
-        for i in range(3): # 3 попытки
-            print(f"      [FinancialModelAgent] Попытка {i+1}/3 генерации отчета...")
-            # --- ИЗМЕНЕНИЕ: Вызов LLM теперь в цикле ---
-            attempted_report = self._invoke_llm_for_json(arbiter_llm, prompt, FinancialReport)
-            if attempted_report and attempted_report.get('markdown_content'):
-                report = attempted_report
-                break # Успех, выходим из цикла
-            time.sleep(5) # Пауза перед повторной попыткой
+        print(f"      [FinancialModelAgent] Генерирую отчет с отказоустойчивым механизмом...")
+        report = invoke_llm_for_json_with_retry(arbiter_llm, self.llms['expert_lite'], prompt, FinancialReport)
         
         # --- Проверка результата ПОСЛЕ цикла ---
         if report:
@@ -599,13 +584,8 @@ class ExpertTeam:
 3.  **Верни результат** в виде ОДНОГО JSON-объекта.
 """
         report = None
-        for i in range(3): # 3 попытки
-            print(f"      [ProductManagerAgent] Попытка {i+1}/3 генерации отчета...")
-            attempted_report = self._invoke_llm_for_json(arbiter_llm, prompt, ProductBrief)
-            if attempted_report and attempted_report.get('product_description'):
-                report = attempted_report
-                break # Успех, выходим из цикла
-            time.sleep(5) # Пауза перед повторной попыткой
+        print(f"      [ProductManagerAgent] Генерирую отчет с отказоустойчивым механизмом...")
+        report = invoke_llm_for_json_with_retry(arbiter_llm, self.llms['expert_lite'], prompt, ProductBrief)
 
         # --- Проверка результата ПОСЛЕ цикла ---
         if report:

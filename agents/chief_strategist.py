@@ -5,6 +5,8 @@ from pydantic import BaseModel, Field
 from typing import List, Literal, TYPE_CHECKING 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.output_parsers import PydanticOutputParser
+from utils.helpers import invoke_llm_for_json_with_retry
+
 
 # --- РЕШЕНИЕ ПРОБЛЕМЫ ЦИКЛИЧЕСКОЙ ЗАВИСИМОСТИ ТИПОВ ---
 if TYPE_CHECKING:
@@ -56,31 +58,12 @@ class ChiefStrategist:
     "Мозг" системы. Создает план, проводит рефлексию и пишет финальные отчеты.
     Работает с самой мощной моделью (gemini-pro).
     """
-    def __init__(self, llm: ChatGoogleGenerativeAI):
-        self.llm = llm
-        print("-> ChiefStrategist (на базе gemini-pro) готов к работе.")
+    def __init__(self, llm: ChatGoogleGenerativeAI, sanitizer_llm: ChatGoogleGenerativeAI):
+      self.llm = llm
+      self.sanitizer_llm = sanitizer_llm
+      print("-> ChiefStrategist (на базе gemini-pro) готов к работе. Оснащен 'санитарной' моделью.")
 
-    def _invoke_llm_for_json(self, prompt: str, pydantic_schema: BaseModel):
-        """
-        Новый, надежный метод для вызова LLM с гарантированным JSON-ответом.
-        """
-        print("   [Стратег] -> Вызов LLM для генерации структурированного JSON...")
-        parser = PydanticOutputParser(pydantic_object=pydantic_schema)
-        
-        prompt_with_format_instructions = f"""{prompt}
-
-{parser.get_format_instructions()}
-"""
-        try:
-            response = self.llm.invoke(prompt_with_format_instructions)
-            parsed_object = parser.parse(response.content)
-            print("   [Стратег] <- Ответ LLM успешно получен и распарсен.")
-            # Возвращаем как словарь для совместимости с остальным кодом
-            return parsed_object.model_dump() 
-        except Exception as e:
-            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА LLM/Парсера: Не удалось сгенерировать или распарсить JSON. Ошибка: {e}")
-            # Возвращаем пустой словарь, чтобы система могла обработать сбой
-            return {}
+    
         
     
 
@@ -125,7 +108,7 @@ class ChiefStrategist:
 
 Ты ОБЯЗАН вернуть результат в формате JSON, соответствующем предоставленной схеме.
 """
-        plan = self._invoke_llm_for_json(prompt, StrategicPlan)
+        plan = invoke_llm_for_json_with_retry(self.llm, self.sanitizer_llm, prompt, StrategicPlan)
 
         if plan and "phases" in plan:
             print("   [Стратег] Первоначальный план успешно сгенерирован.")
@@ -192,17 +175,12 @@ class ChiefStrategist:
 Верни результат в виде ОДНОГО JSON-объекта.
 """
         
-        parser = PydanticOutputParser(pydantic_object=RagQuerySet)
-        prompt_with_instructions = f"{prompt}\n\n{parser.get_format_instructions()}"
-        
-        try:
-            response = query_gen_llm.invoke(prompt_with_instructions)
-            parsed_object = parser.parse(response.content)
-            report = parsed_object.model_dump()
-        except Exception as e:
-            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА при генерации RAG-запросов: {e}")
-            report = {}
-        # --------------------------------------------------------------------
+        report = invoke_llm_for_json_with_retry(
+            main_llm=query_gen_llm,          # Основная модель - быстрая query_gen_llm
+            sanitizer_llm=self.sanitizer_llm, # Резервная модель - из self.sanitizer_llm
+            prompt=prompt,
+            pydantic_schema=RagQuerySet
+        )
 
         return report
     
@@ -263,7 +241,7 @@ class ChiefStrategist:
 
 Ты ОБЯЗАН вернуть результат в формате JSON, соответствующем предоставленной схеме.
 """
-        return self._invoke_llm_for_json(prompt, StrategicPlan)
+        return invoke_llm_for_json_with_retry(self.llm, self.sanitizer_llm, prompt, StrategicPlan)
 
     def write_executive_summary(self, world_model: 'WorldModel', feedback: str = None) -> str:
         """Пишет короткую аналитическую записку, используя RAG-контекст."""
@@ -375,18 +353,17 @@ class ChiefStrategist:
 Проанализируй текст и верни результат в формате JSON. Если все критерии выполнены, `is_valid` должно быть `True`. Если хотя бы один критерий нарушен, `is_valid` должно быть `False`, а в `reasons` укажи, что именно не так.
 """
         
-        parser = PydanticOutputParser(pydantic_object=ValidationReport)
-        prompt_with_instructions = f"{prompt}\n\n{parser.get_format_instructions()}"
-        
-        try:
-            response = validator_llm.invoke(prompt_with_instructions)
-            parsed_object = parser.parse(response.content)
-            report = parsed_object.model_dump()
-        except Exception as e:
-            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА при валидации артефакта: {e}")
-            report = {"is_valid": False, "reasons": ["Ошибка парсинга ответа валидатора."]}
-        # --------------------------------------------------------------------
+        report = invoke_llm_for_json_with_retry(
+            main_llm=validator_llm,          # Основная модель - та, что передали для валидации
+            sanitizer_llm=self.sanitizer_llm, # Резервная модель - из self.sanitizer_llm
+            prompt=prompt,
+            pydantic_schema=ValidationReport
+        )
+        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
             
+        if not report: # Если invoke_llm_for_json_with_retry вернул пустой словарь
+            report = {"is_valid": False, "reasons": ["Критическая ошибка: не удалось получить ответ от валидатора."]}
+
         if report.get('is_valid', False):
             print("      [Валидатор] <- Артефакт прошел проверку качества.")
         else:
@@ -438,18 +415,13 @@ class ChiefStrategist:
 **ИНСТРУКЦИЯ:** Верни JSON-объект, содержащий поле `relevant_claim_ids`. Это должен быть список, содержащий ТОЛЬКО ID тех утверждений, которые напрямую помогают ответить **хотя бы на один** из четырех бизнес-вопросов.
 """
         
-        # --- ИЗМЕНЕНИЕ: Используем новый PydanticOutputParser с filter_llm ---
-        parser = PydanticOutputParser(pydantic_object=BatchRelevanceReport)
-        prompt_with_instructions = f"{prompt}\n\n{parser.get_format_instructions()}"
-        
-        try:
-            response = filter_llm.invoke(prompt_with_instructions)
-            parsed_object = parser.parse(response.content)
-            report = parsed_object.model_dump()
-        except Exception as e:
-            print(f"!!! КРИТИЧЕСКАЯ ОШИБКА при пакетной фильтрации: {e}")
-            report = {}
-        # --------------------------------------------------------------------
+        report = invoke_llm_for_json_with_retry(
+            main_llm=filter_llm,             # Основная модель - быстрая filter_llm
+            sanitizer_llm=self.sanitizer_llm, # Резервная модель - из self.sanitizer_llm
+            prompt=prompt,
+            pydantic_schema=BatchRelevanceReport
+        )
+        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
         
         relevant_ids = set(report.get('relevant_claim_ids', []))
         relevant_kb = {claim_id: claim for claim_id, claim in knowledge_base.items() if claim_id in relevant_ids}

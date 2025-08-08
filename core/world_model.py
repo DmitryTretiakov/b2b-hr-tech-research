@@ -36,7 +36,7 @@ class WorldModel:
         os.makedirs(self.cache_dir, exist_ok=True)
 
         # Инициализируем семантический индекс
-        embedding_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+        embedding_model = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
         self.semantic_index = SemanticIndex(embedding_model=embedding_model)
 
         # Инициализируем пустое состояние по умолчанию

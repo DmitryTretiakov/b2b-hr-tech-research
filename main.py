@@ -1,10 +1,12 @@
 # main.py
+import json
 import os
 import time 
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 import argparse
 from core.world_model import WorldModel
+from core.budget_manager import APIBudgetManager
 from agents.chief_strategist import ChiefStrategist
 from agents.expert_team import ExpertTeam
 from agents.search_agent import SearchAgent
@@ -28,6 +30,19 @@ def main():
         action='store_true',
         help='Начать новое исследование, игнорируя сохраненное состояние.'
     )
+
+    daily_limits = {
+        "models/gemini-2.5-pro": 100,
+        "models/gemini-2.5-flash": 250,
+        "models/gemini-2.5-flash-lite": 1000,
+        "models/gemini-2.0-flash": 200,
+        "models/gemini-2.0-flash-lite": 200,
+        "models/gemma-3-27b-it": 14400,
+        "models/gemini-embedding-001": 1000,
+        "models/gemma-3-12b-it": 14400
+    }
+    budget_manager = APIBudgetManager(world_model.output_dir, daily_limits)
+    
     args = parser.parse_args()
     # --- ИНИЦИАЛИЗАЦИЯ ---
     load_dotenv()
@@ -142,8 +157,8 @@ def main():
         serper_api_key=os.getenv("SERPAPI_API_KEY"),
         cache_dir=world_model.cache_dir
     )
-    expert_team = ExpertTeam(llms, search_agent)
-    strategist = ChiefStrategist(llms["strategist"])
+    expert_team = ExpertTeam(llms, search_agent, budget_manager)
+    strategist = ChiefStrategist(llm=llms["strategist"], sanitizer_llm=llms["source_auditor"])
     
     # --- ЗАПУСК РАБОТЫ ---
     print("\n--- ЗАПУСК ОСНОВНОГО ЦИКЛА ОРКЕСТРАТОРА ---")

@@ -5,7 +5,10 @@ import re
 import json
 import time
 from serpapi import SerpApiClient
-
+import time
+from langchain.output_parsers import PydanticOutputParser
+from langchain_google_genai import ChatGoogleGenerativeAI
+from pydantic import BaseModel
 # --- НОВОЕ КАСТОМНОЕ ИСКЛЮЧЕНИЕ ---
 class SearchAPIFailureError(Exception):
     """Исключение, выбрасываемое, когда все поисковые API не смогли вернуть результат."""
@@ -27,7 +30,7 @@ def robust_hybrid_search(query: str, num_results: int = 10) -> dict:
         print("   [!!! ОШИБКА] Ключ SERPER_API_KEY НЕ доступен внутри функции (равен None).")
     print("------------------------------------------\n")
     # --- КОНЕЦ ДИАГНОСТИКИ ---
-    
+
     if serper_api_key:
         print(f"    -> [Поиск Serper] Выполняю POST-запрос: '{query}'...")
         url = "https://google.serper.dev/search"
@@ -254,3 +257,66 @@ def format_search_results_for_llm(search_results: dict) -> str:
         snippets.append(snippet)
     
     return "\n".join(snippets)
+
+def invoke_llm_for_json_with_retry(
+    main_llm: ChatGoogleGenerativeAI,
+    sanitizer_llm: ChatGoogleGenerativeAI,
+    prompt: str,
+    pydantic_schema: BaseModel,
+    max_retries: int = 3
+) -> dict:
+    """
+    Выполняет вызов LLM для получения JSON с многоуровневой стратегией повторных попыток.
+    Принцип Нулевого Доверия: мы не верим, что LLM вернет валидный JSON с первого раза.
+    """
+    parser = PydanticOutputParser(pydantic_object=pydantic_schema)
+    prompt_with_instructions = f"{prompt}\n\n{parser.get_format_instructions()}"
+    
+    last_error = None
+    raw_output = ""
+
+    for attempt in range(max_retries):
+        print(f"      [JSON Invoker] Попытка {attempt + 1}/{max_retries}...")
+        
+        current_prompt = prompt_with_instructions
+        current_llm = main_llm
+
+        if attempt == 1: # Вторая попытка: просим основную модель исправить свой же вывод
+            print("      [JSON Invoker] Стратегия 2: Прошу основную модель исправить свой невалидный JSON.")
+            current_prompt = f"""Твой предыдущий ответ не удалось распарсить. Он вернул ошибку: {last_error}.
+Пожалуйста, верни ТОЛЬКО валидный JSON, который соответствует запрошенной схеме.
+
+Вот твой предыдущий, невалидный ответ:
+---
+{raw_output}
+---
+
+Вот оригинальные инструкции по формату:
+{parser.get_format_instructions()}
+"""
+        elif attempt == 2: # Третья попытка: используем "санитарную" модель для извлечения JSON
+            print("      [JSON Invoker] Стратегия 3: Использую 'санитарную' модель для извлечения JSON из вывода.")
+            current_llm = sanitizer_llm
+            current_prompt = f"""Извлеки валидный JSON объект из текста ниже. Верни ТОЛЬКО сам JSON и ничего больше.
+
+ТЕКСТ ДЛЯ АНАЛИЗА:
+---
+{raw_output}
+---
+
+Вот оригинальные инструкции по формату, которым должен соответствовать JSON:
+{parser.get_format_instructions()}
+"""
+        try:
+            response = current_llm.invoke(current_prompt)
+            raw_output = response.content # Сохраняем сырой вывод для возможных исправлений
+            parsed_object = parser.parse(raw_output)
+            print("      [JSON Invoker] <- Ответ LLM успешно получен и распарсен.")
+            return parsed_object.model_dump()
+        except Exception as e:
+            last_error = e
+            print(f"      [JSON Invoker] !!! Ошибка на попытке {attempt + 1}: {e}")
+            time.sleep(3) # Небольшая пауза перед следующей попыткой
+
+    print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось получить валидный JSON после {max_retries} попыток.")
+    return {} # Возвращаем пустой словарь в случае полного провала
