@@ -163,7 +163,7 @@ def main():
     search_agent = SearchAgent(
         google_api_key=os.getenv("GOOGLE_SEARCH_API_KEY"),
         google_cx_id=os.getenv("SEARCH_ENGINE_ID"),
-        serper_api_key=os.getenv("SERPAPI_API_KEY"),
+        serper_api_key=os.getenv("SERPER_API_KEY"),
         cache_dir=world_model.cache_dir
     )
 

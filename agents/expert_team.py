@@ -213,12 +213,9 @@ class ExpertTeam:
         Единый диспетчер моделей. Выбирает LLM на основе типа задачи и доступного бюджета.
         """
         if task_type == 'NLI':
-            flash_lite_model_name = "models/gemini-2.5-flash-lite"
-            # --- НАЧАЛО ИСПРАВЛЕНИЯ ---
-            if self.budget_manager.can_i_spend(flash_lite_model_name): # БЫЛО: flash_model_name
-                print(f"   [Диспетчер NLI] Использую основную модель: {flash_lite_model_name}")
-                return self.llms["expert_lite"]
-            # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+            flash_model_name = "models/gemini-2.5-flash"
+            if self.budget_manager.can_i_spend(flash_model_name):
+                return self.llms["expert_flash"]
 
             gemma_model_name = "models/gemma-3-27b-it"
             print(f"!!! ВНИМАНИЕ: [Диспетчер NLI] Бюджет для {flash_model_name} исчерпан. Переключаюсь на резерв {gemma_model_name}.")
@@ -424,6 +421,11 @@ class ExpertTeam:
 
             # Шаг 2: Поиск и форматирование результатов
             raw_results = [self.search_agent.search(q) for q in search_queries]
+            # Проверяем, есть ли хоть один реальный результат во всех ответах
+            has_any_real_results = any(res.get("items") for res in raw_results)
+            if not has_any_real_results:
+                print(f"!!! Эксперт {assignee}: Поиск по всем запросам не дал никаких органических результатов. Задача завершена без новых фактов.")
+                return []
             search_results_str = "\n".join([format_search_results_for_llm(r) for r in raw_results])
 
             # Шаг 3: Написание черновика "Утверждений"
@@ -449,10 +451,10 @@ class ExpertTeam:
 
             # Шаг 4: Аудит содержимого
             vulnerabilities_dict = self._audit_claims(enriched_claims, world_model_context)
-            vulnerabilities = vulnerabilities_dict.get('vulnerabilities', {})
-            if not vulnerabilities:
-                print(f"!!! Эксперт {assignee}: Аудит не вернул результатов. Прерываю обработку задачи во избежание передачи невалидированных данных.")
-                return [] # Возвращаем пустой список, задача считается выполненной, но безрезультатно
+            if vulnerabilities_dict is None or 'vulnerabilities' not in vulnerabilities_dict:
+                print(f"!!! Эксперт {assignee}: Процесс аудита провалился и не вернул структуру данных. Прерываю обработку.")
+                return []
+            vulnerabilities = vulnerabilities_dict['vulnerabilities']
             # Шаг 5: Финализация
             final_claims_dict = self._finalize_claims(assignee, description, search_results_str, enriched_claims, vulnerabilities, world_model_context)
             final_claims = final_claims_dict.get('claims', [])
