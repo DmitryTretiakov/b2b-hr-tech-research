@@ -55,6 +55,10 @@ class RelevanceCheck(BaseModel):
     """Описывает результат проверки утверждения на коммерческую релевантность."""
     is_relevant: bool = Field(description="True, если утверждение напрямую помогает ответить хотя бы на один из бизнес-вопросов, иначе False.")
 
+class GapAnalysisReport(BaseModel):
+    """Отчет по анализу пробелов в данных."""
+    missing_info_tasks: List[Task] = Field(description="Список исследовательских задач для сбора недостающей критической информации. Если информация полна, список должен быть пустым.")
+
 class ChiefStrategist:
     """
     "Мозг" системы. Создает план, проводит рефлексию и пишет финальные отчеты.
@@ -518,3 +522,54 @@ class ChiefStrategist:
 
         print("   [Стратег] <- Отчет по Базе Знаний сгенерирован.")
         return "".join(report_lines)
+    
+    def run_gap_analysis(self, world_model: 'WorldModel') -> list:
+        """
+        Использует мощную модель (Gemini 2.5 Flash) для анализа полноты всех собранных данных.
+        Если находит пробелы, генерирует задачи для их устранения.
+        """
+        print("   [Стратег.GapAnalysis] -> Анализирую Базу Знаний на предмет пробелов...")
+        
+        full_context = world_model.get_full_context()
+        kb = full_context['dynamic_knowledge']['knowledge_base']
+        main_goal = full_context['static_context']['main_goal']
+        
+        prompt = f"""**ТВОЯ РОЛЬ:** Ты — придирчивый и дотошный Старший Аналитик, почти параноик. Твоя задача — найти слабые места в исследовании, прежде чем оно попадет к руководству.
+**КОНТЕКСТ:** Команда младших аналитиков (на базе Gemma) собрала Базу Знаний для достижения главной цели: "{main_goal}". Они считают, что работа закончена. Твоя задача — доказать, что они неправы.
+**ВСЯ СОБРАННАЯ БАЗА ЗНАНИЙ:**
+---
+{json.dumps(kb, ensure_ascii=False, indent=2)}
+---
+**ТВОЯ ЗАДАЧА:**
+1.  **Проанализируй** всю Базу Знаний в контексте главной цели.
+2.  **Найди "белые пятна".** Какой критически важной информации НЕ ХВАТАЕТ для создания убедительного бизнес-кейса, финансовой модели и продуктового брифа? Думай о рисках, скрытых расходах, юридических аспектах, реалистичных цифрах по рынку РФ/Томска, технических ограничениях.
+3.  **Сгенерируй список задач.** Если ты нашел пробелы, сформулируй от 1 до 5 четких исследовательских задач для младших аналитиков (assignee: 'HR_Expert', 'Finance_Expert', 'Tech_Expert' и т.д.).
+4.  **Если данные полны,** верни пустой список `missing_info_tasks`. Это твой способ сказать "Проверено, данных достаточно".
+
+Ты ОБЯЗАН вернуть результат в формате JSON.
+"""
+        # Используем self.medium_llm (Gemini 2.5 Flash) для этой ответственной задачи
+        report = invoke_llm_for_json_with_retry(
+            main_llm=self.medium_llm,
+            sanitizer_llm=self.sanitizer_llm,
+            prompt=prompt,
+            pydantic_schema=GapAnalysisReport,
+            budget_manager=self.budget_manager
+        )
+        
+        tasks = report.get('missing_info_tasks', [])
+        if tasks:
+            print(f"   [Стратег.GapAnalysis] <- Найдены пробелы в данных. Сгенерировано {len(tasks)} задач.")
+        else:
+            print("   [Стратег.GapAnalysis] <- Пробелов не найдено. Данные признаны полными.")
+            
+        return tasks
+
+    # Также нужно добавить метод для обновления статуса в world_model
+    def update_main_goal_status(self, new_status: str):
+        """Обновляет только статус главной цели в плане."""
+        plan = self.dynamic_knowledge.get("strategic_plan", {})
+        if plan:
+            plan["main_goal_status"] = new_status
+            print(f"   [WorldModel] Статус главной цели обновлен на '{new_status}'.")
+            self._save_state_to_disk()

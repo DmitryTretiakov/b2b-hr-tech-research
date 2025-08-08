@@ -230,7 +230,7 @@ def main():
                         
                         print(f"[Supervisor] <- Добавлено {len(contrarian_tasks)} новых контрарных задач. Цикл будет перезапущен.")
                         continue # Перезапускаем главный цикл, чтобы немедленно выполнить эти задачи
-                    
+
             print("\n--- Все задачи текущей фазы выполнены. Запускаю рефлексию Стратега... ---")
             
             reflection_success = False
@@ -263,9 +263,25 @@ def main():
             time.sleep(STRATEGIST_COOLDOWN_SECONDS)
             
             # Этот код остается таким же, но теперь он будет вызван только после УСПЕШНОЙ рефлексии
-            if world_model.get_full_context()['dynamic_knowledge']['strategic_plan'].get("main_goal_status") == "READY_FOR_FINAL_BRIEF":
-                print("--- Стратег решил, что информации достаточно. Переходим к написанию финального отчета. ---")
-                break
+            current_status = world_model.get_full_context()['dynamic_knowledge']['strategic_plan'].get("main_goal_status")
+            if current_status == "READY_FOR_FINAL_BRIEF":
+                print("\n[Quality Gate] Стратег готов к финалу. Запускаю обязательный Аудит Полноты (Gap Analysis)...")
+                
+                # Вызываем новый метод, который использует Gemini 2.5 Flash
+                missing_info_tasks = strategist.run_gap_analysis(world_model)
+                
+                if missing_info_tasks:
+                    print(f"[Quality Gate] !!! Аудит выявил нехватку информации. Добавлено {len(missing_info_tasks)} новых задач.")
+                    # Добавляем задачи в план
+                    for task in missing_info_tasks:
+                        world_model.add_task_to_plan(task)
+                    
+                    # Возвращаем систему в рабочий режим
+                    world_model.update_main_goal_status("IN_PROGRESS")
+                    continue # Продолжаем цикл для выполнения новых задач
+                else:
+                    print("[Quality Gate] -> Аудит Полноты пройден. Данных достаточно. Перехожу к генерации финальных артефактов.")
+                    break # Выходим из цикла, т.к. данные верифицированы
             
             # --- НАЧАЛО: ПРОТОКОЛ АВАРИЙНОГО ПЕРЕХОДА ФАЗЫ ---
             if not world_model.get_active_tasks():

@@ -655,7 +655,7 @@ class ExpertTeam:
         """Генерирует финансовую модель, используя Gemma."""
         print(f"   [FinancialModelAgent] -> Приступаю к задаче: {task['description']}")
         
-        arbiter_llm = self._get_llm_for_task('SPECIALIST')
+        arbiter_llm = self._get_llm_for_task('AUDIT')
         
         # Используем RAG, чтобы дать агенту только релевантные факты
         relevant_claims = world_model.semantic_index.find_similar_claim_ids(task['description'], top_k=50)
@@ -712,7 +712,7 @@ class ExpertTeam:
         """Генерирует продуктовый бриф, используя Gemma."""
         print(f"   [ProductManagerAgent] -> Приступаю к задаче: {task['description']}")
         
-        arbiter_llm = self._get_llm_for_task('SPECIALIST')
+        arbiter_llm = self._get_llm_for_task('AUDIT')
         
         relevant_claims = world_model.semantic_index.find_similar_claim_ids(task['description'], top_k=70)
         kb = world_model.get_full_context()['dynamic_knowledge']['knowledge_base']
