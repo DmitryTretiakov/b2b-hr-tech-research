@@ -170,3 +170,12 @@ class WorldModel:
             "static_context": self.static_context,
             "dynamic_knowledge": self.dynamic_knowledge
         }
+    
+    def update_phase_status(self, phase_name: str, new_status: str):
+        """Обновляет статус фазы в памяти."""
+        plan = self.dynamic_knowledge.get("strategic_plan", {})
+        for phase in plan.get("phases", []):
+            if phase.get("phase_name") == phase_name:
+                phase["status"] = new_status
+                print(f"   [WorldModel] Статус фазы '{phase_name}' обновлен на '{new_status}' (в памяти).")
+                return

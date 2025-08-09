@@ -2,7 +2,6 @@
 import os
 import time
 import argparse
-from collections import defaultdict
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from google.api_core.exceptions import ResourceExhausted
@@ -10,30 +9,30 @@ from google.api_core.exceptions import ResourceExhausted
 from core.world_model import WorldModel
 from core.budget_manager import APIBudgetManager
 from agents.search_agent import SearchAgent
-from utils.helpers import SearchAPIFailureError, citation_post_processor # ИМПОРТ НОВОЙ ФУНКЦИИ
+from utils.helpers import SearchAPIFailureError, citation_post_processor
 
 from agents.supervisor import SupervisorAgent
 from agents.researcher import ResearcherAgent
 from agents.contrarian import ContrarianAgent
-from agents.quality_assessor import BatchQualityAssessor
+from agents.quality_assessor import BatchQualityAssessor, SanityCheckCritic # ИМПОРТ SanityCheckCritic
 from agents.fixer import BatchFixerAgent
-from agents.analyst import AnalystAgent # ИМПОРТ АНАЛИТИКА
+from agents.analyst import AnalystAgent
 from agents.report_writer import ReportWriterAgent
 
-TASK_BATCH_SIZE = 2
+# КОНСТАНТЫ
 MAX_RETRIES = 2
 RETRY_DELAY_SECONDS = 60
-TASK_COOLDOWN_SECONDS = 5
-STRATEGIST_COOLDOWN_SECONDS = 10
+PHASE_COOLDOWN_SECONDS = 10
+STRATEGIST_COOLDOWN_SECONDS = 15
 
 def main():
-    parser = argparse.ArgumentParser(description="Фабрика Обогащения Данных")
+    parser = argparse.ArgumentParser(description="Фабрика Обогащения Данных v3.1")
     parser.add_argument('--fresh-start', action='store_true')
-    parser.add_argument('--new-plan-keep-kb', action='to_plan_only')
+    parser.add_argument('--new-plan-keep-kb', action='store_true')
     args = parser.parse_args()
 
     load_dotenv()
-    print("Инициализация системы 'Фабрика Обогащения Данных' v3.0...")
+    print("Инициализация системы 'Фабрика Обогащения Данных'...")
 
     try:
         llms = {
@@ -46,7 +45,6 @@ def main():
         print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать модели LLM: {e}")
         return
 
-    # Инициализация WorldModel и BudgetManager
     daily_limits = {
         "models/gemini-2.5-pro": 100, "models/gemini-2.5-flash": 250,
         "models/gemini-2.5-flash-lite": 1000, "models/gemma-3-27b-it": 14400,
@@ -120,8 +118,9 @@ def main():
     researcher = ResearcherAgent(llm=llms["flash"], sanitizer_llm=llms["lite"], search_agent=search_agent, budget_manager=budget_manager)
     contrarian = ContrarianAgent(llm=llms["flash"], sanitizer_llm=llms["lite"], search_agent=search_agent, budget_manager=budget_manager)
     quality_assessor = BatchQualityAssessor(llm=llms["lite"], sanitizer_llm=llms["lite"], budget_manager=budget_manager)
+    sanity_checker = SanityCheckCritic(llm=llms["flash"], sanitizer_llm=llms["lite"], budget_manager=budget_manager) # ИНИЦИАЛИЗАЦИЯ
     fixer = BatchFixerAgent(llm=llms["flash"], sanitizer_llm=llms["lite"], budget_manager=budget_manager)
-    analyst = AnalystAgent(llm=llms["pro"], sanitizer_llm=llms["gemma"], budget_manager=budget_manager) # ИНИЦИАЛИЗАЦИЯ АНАЛИТИКА
+    analyst = AnalystAgent(llm=llms["pro"], sanitizer_llm=llms["gemma"], budget_manager=budget_manager)
     report_writer = ReportWriterAgent(llm=llms["pro"], sanitizer_llm=llms["gemma"], budget_manager=budget_manager)
 
     # Создание плана
@@ -132,94 +131,87 @@ def main():
         world_model.update_strategic_plan(plan)
         world_model.save_state()
 
-    # Главный цикл
+    # --- УЯЗВИМОСТЬ №3 ИСПРАВЛЕНА: ОБРАБОТКА ПО ФАЗАМ ---
     while True:
-        active_tasks = world_model.get_active_tasks()
+        current_plan = world_model.get_full_context()['dynamic_knowledge']['strategic_plan']
+        active_phase = next((p for p in current_plan.get("phases", []) if p.get("status") == "IN_PROGRESS"), None)
 
-        if not active_tasks:
-            print("\n--- Все задачи выполнены. Запускаю декомпозированную рефлексию... ---")
-            
-            # ЭТАП 1: АНАЛИЗ
-            kb = world_model.get_full_context()['dynamic_knowledge']['knowledge_base']
-            analyst_report = analyst.run_reflection_analysis(kb)
-            
-            # ЭТАП 2: ПЛАНИРОВАНИЕ
-            current_plan = world_model.get_full_context()['dynamic_knowledge']['strategic_plan']
-            updated_plan = supervisor.reflect_and_update_plan(analyst_report, current_plan)
-            world_model.update_strategic_plan(updated_plan)
+        if not active_phase:
+            print("[Оркестратор] Все фазы выполнены или нет активных фаз. Перехожу к финализации.")
+            break
 
-            if world_model.get_full_context()['dynamic_knowledge']['strategic_plan'].get("main_goal_status") == "READY_FOR_FINAL_BRIEF":
-                break
-            if not world_model.get_active_tasks():
-                 print("!!! [Оркестратор] КРИТИЧЕСКАЯ ОШИБКА: Рефлексия не привела к созданию новых задач.")
-                 break
-            world_model.save_state()
-            time.sleep(STRATEGIST_COOLDOWN_SECONDS)
-            continue
-
-        # Пакетная обработка задач (без изменений)
-        tasks_to_run_batch = active_tasks[:TASK_BATCH_SIZE * 2]
-        tasks_by_assignee = defaultdict(list)
-        for task in tasks_to_run_batch:
-            tasks_by_assignee[task['assignee']].append(task)
+        print(f"\n--- [Оркестратор] Начинаю обработку фазы: {active_phase['phase_name']} ---")
+        tasks_for_phase = active_phase.get('tasks', [])
         
-        all_raw_claims, processed_task_ids = [], set()
         try:
-            researcher_tasks = tasks_by_assignee.get('ResearcherAgent', [])
+            # Шаг 1: Пакетная генерация "сырья"
+            researcher_tasks = [t for t in tasks_for_phase if t['assignee'] == 'ResearcherAgent']
+            contrarian_tasks = [t for t in tasks_for_phase if t['assignee'] == 'ContrarianAgent']
+            
+            all_raw_claims = []
             if researcher_tasks:
                 all_raw_claims.extend(researcher.execute_batch(researcher_tasks))
-                processed_task_ids.update([t['task_id'] for t in researcher_tasks])
-
-            contrarian_tasks = tasks_by_assignee.get('ContrarianAgent', [])
             if contrarian_tasks:
                 all_raw_claims.extend(contrarian.execute_batch(contrarian_tasks))
-                processed_task_ids.update([t['task_id'] for t in contrarian_tasks])
-            
-            if not processed_task_ids:
-                time.sleep(TASK_COOLDOWN_SECONDS)
-                continue
 
+            # Шаг 2: Первичный контроль качества
             assessment = quality_assessor.assess_batch(all_raw_claims)
-            fixed_claims = fixer.fix_batch(assessment['fixable_claims'])
-            verified_claims = assessment['good_claims'] + fixed_claims
             
-            if verified_claims:
-                world_model.add_claims_to_kb(verified_claims)
+            # --- УЯЗВИМОСТЬ №1 ИСПРАВЛЕНА: ИТЕРАТИВНЫЙ ЦИКЛ ПРОВЕРКИ ---
+            # Шаг 3: Исправление "серой зоны"
+            fixed_claims_draft = fixer.fix_batch(assessment['fixable_claims'])
+            
+            # Шаг 3.1: Повторная проверка исправленных утверждений
+            re_assessment = quality_assessor.assess_batch(fixed_claims_draft)
+            print(f"   [Оркестратор] Повторная проверка: {len(re_assessment['good_claims'])} из {len(fixed_claims_draft)} утверждений успешно исправлены.")
 
-            for task_id in processed_task_ids:
-                world_model.update_task_status(task_id, 'COMPLETED')
-                world_model.log_transaction({'task': {'task_id': task_id}, 'results': "Processed in batch."})
+            # --- УЯЗВИМОСТЬ №2 ИСПРАВЛЕНА: ФИНАЛЬНЫЙ "ЗОЛОТОЙ СТАНДАРТ" ---
+            # Шаг 4: Сборка кандидатов для финальной проверки
+            claims_for_final_check = assessment['good_claims'] + re_assessment['good_claims']
+            
+            # Шаг 4.1: Проверка на "Золотой Стандарт"
+            final_verified_claims = sanity_checker.verify_batch(claims_for_final_check)
+            
+            # Шаг 5: Добавление в Базу Знаний
+            if final_verified_claims:
+                world_model.add_claims_to_kb(final_verified_claims)
+            
+            # Шаг 6: Обновление статусов
+            for task in tasks_for_phase:
+                world_model.update_task_status(task['task_id'], 'COMPLETED')
+            world_model.update_phase_status(active_phase['phase_name'], 'COMPLETED') # Новый метод в WorldModel
 
         except (SearchAPIFailureError, ResourceExhausted) as e:
-            print(f"!!! ОРКЕСТРАТОР: Системная ошибка при выполнении пакета: {e}")
-            for task_id in processed_task_ids: world_model.update_task_status(task_id, 'FAILED')
+            print(f"!!! ОРКЕСТРАТОР: Системная ошибка при обработке фазы: {e}. Фаза провалена.")
+            world_model.update_phase_status(active_phase['phase_name'], 'FAILED')
         except Exception as e:
-            print(f"!!! ОРКЕСТРАТОР: Непредвиденная ошибка при выполнении пакета: {e}")
-            for task_id in processed_task_ids: world_model.update_task_status(task_id, 'FAILED')
+            print(f"!!! ОРКЕСТРАТОР: Непредвиденная ошибка при обработке фазы: {e}. Фаза провалена.")
+            world_model.update_phase_status(active_phase['phase_name'], 'FAILED')
 
-        print("   [Оркестратор] Фиксирую изменения на диске...")
+        # Шаг 7: Сохранение состояния и рефлексия
+        print("   [Оркестратор] Фаза обработана. Фиксирую изменения и запускаю рефлексию...")
         world_model.save_state()
-        time.sleep(TASK_COOLDOWN_SECONDS)
+        time.sleep(PHASE_COOLDOWN_SECONDS)
 
-    # --- НОВЫЙ КОНВЕЙЕР ГЕНЕРАЦИИ ФИНАЛЬНОГО ОТЧЕТА ---
+        kb = world_model.get_full_context()['dynamic_knowledge']['knowledge_base']
+        analyst_report = analyst.run_reflection_analysis(kb)
+        
+        current_plan_after_phase = world_model.get_full_context()['dynamic_knowledge']['strategic_plan']
+        updated_plan = supervisor.reflect_and_update_plan(analyst_report, current_plan_after_phase)
+        world_model.update_strategic_plan(updated_plan)
+        world_model.save_state() # Сохраняем новый план
+        time.sleep(STRATEGIST_COOLDOWN_SECONDS)
+
+    # Финальный отчет (без изменений)
     print("\n--- Запускаю конвейер генерации финального отчета ---")
-    
-    # 1. Синтез
     kb = world_model.get_full_context()['dynamic_knowledge']['knowledge_base']
     synthesis_data = analyst.run_final_synthesis(kb)
-    
-    # 2. Написание
     raw_markdown = report_writer.write_final_report(synthesis_data)
-    
-    # 3. Детерминированная пост-обработка
     final_markdown = citation_post_processor(raw_markdown, kb)
-    
-    # 4. Сохранение
     report_path = os.path.join(world_model.output_dir, "Executive_Summary_For_Director.md")
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(final_markdown)
     print(f"-> Финальный отчет с верифицированными цитатами сохранен в {report_path}")
-
     print(f"\n--- РАБОТА УСПЕШНО ЗАВЕРШЕНА ---")
 
 if __name__ == "__main__":
