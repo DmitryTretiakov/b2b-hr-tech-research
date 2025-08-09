@@ -117,6 +117,11 @@ class ExpertTeam:
         Выполняет задачу по разрешению конфликта между двумя утверждениями.
         """
         print(f"   [Арбитр] -> Приступаю к разрешению конфликта: {task['description']}")
+
+        if 'conflict_details' not in task or 'claim_ids' not in task['conflict_details'] or len(task['conflict_details']['claim_ids']) != 2:
+            print(f"   [Арбитр] !!! КРИТИЧЕСКАЯ ОШИБКА: Задача '{task['task_id']}' назначена Арбитру, но не содержит корректного поля 'conflict_details'. Задача создана некорректно Стратегом.")
+            world_model.update_task_status(task['task_id'], 'FAILED')
+            return
         
         # --- 1. Извлечение данных о конфликте ---
         try:
@@ -197,17 +202,19 @@ class ExpertTeam:
         winner_id = final_report['winning_claim_id']
         loser_id = final_report['losing_claim_id']
         
-        # Обновляем статус победителя
+        claims_to_update = []
         if winner_id in kb:
             kb[winner_id]['status'] = 'VERIFIED'
-            world_model.add_claims_to_kb([kb[winner_id]]) # add_claims_to_kb ожидает список
+            claims_to_update.append(kb[winner_id])
             print(f"   [Арбитр] Утверждение {winner_id} подтверждено.")
 
-        # Обновляем статус проигравшего
         if loser_id in kb:
-            kb[loser_id]['status'] = 'DEPRECATED' # Новый статус для проигравших в споре
-            world_model.add_claims_to_kb([kb[loser_id]])
+            kb[loser_id]['status'] = 'DEPRECATED'
+            claims_to_update.append(kb[loser_id])
             print(f"   [Арбитр] Утверждение {loser_id} признано устаревшим.")
+        
+        if claims_to_update:
+            world_model.add_claims_to_kb(claims_to_update)
 
         print("   [Арбитр] <- Конфликт успешно разрешен.")
         world_model.update_task_status(task['task_id'], 'COMPLETED')
@@ -459,8 +466,10 @@ class ExpertTeam:
             final_claims = final_claims_dict.get('claims', [])
             if not final_claims: return []
 
-            # Шаг 6: Интеграция с пакетным NLI-аудитом
+            # --- ШАГ 6: ИНТЕГРАЦИЯ С ПАКЕТНЫМ NLI-АУДИТОМ (ИЗМЕНЕННАЯ ЛОГИКА) ---
             print(f"   [Эксперт {assignee}] Шаг 6/6: Провожу финальную верификацию и интеграцию {len(final_claims)} утверждений...")
+            
+            claims_to_add_to_kb = []
             verified_claims_for_log = []
             knowledge_base = world_model_context['dynamic_knowledge']['knowledge_base']
 
@@ -470,7 +479,7 @@ class ExpertTeam:
                 
                 if not similar_ids:
                     new_claim['status'] = 'VERIFIED'
-                    world_model.add_claims_to_kb(new_claim)
+                    claims_to_add_to_kb.append(new_claim)
                     verified_claims_for_log.append(new_claim)
                     continue
 
@@ -478,7 +487,7 @@ class ExpertTeam:
                 
                 if not existing_claims_to_check:
                     new_claim['status'] = 'VERIFIED'
-                    world_model.add_claims_to_kb(new_claim)
+                    claims_to_add_to_kb.append(new_claim)
                     verified_claims_for_log.append(new_claim)
                     continue
 
@@ -491,32 +500,35 @@ class ExpertTeam:
                         is_conflicted = True
                         
                         conflicted_claim = knowledge_base.get(existing_claim_id)
-                        if conflicted_claim:
+                        if conflicted_claim and conflicted_claim.get('status') != 'CONFLICTED':
                             conflicted_claim['status'] = 'CONFLICTED'
-                            world_model.add_claims_to_kb(conflicted_claim)
+                            claims_to_add_to_kb.append(conflicted_claim)
                         
                         conflict_task = {
                             "task_id": f"conflict_{str(uuid.uuid4())[:8]}",
                             "assignee": "ProductOwnerAgent",
-                            "description": f"Разрешить противоречие между утверждениями {new_claim['claim_id']} и {existing_claim_id}. Найди третий, решающий источник.",
+                            "description": f"Разрешить противоречие между утверждениями {new_claim['claim_id']} и {existing_claim_id}.",
                             "goal": "Обеспечить целостность Базы Знаний.",
                             "status": "PENDING", "retry_count": 0,
-                            "conflict_details": {
-                            "claim_ids": [new_claim['claim_id'], existing_claim_id]
-                            }
+                            "conflict_details": {"claim_ids": [new_claim['claim_id'], existing_claim_id]}
                         }
-                        world_model.add_task_to_plan(conflict_task)
+                        world_model.add_task_to_plan(conflict_task) # Эта операция сама сохраняет состояние
                         break
 
                 if is_conflicted:
                     new_claim['status'] = 'CONFLICTED'
-                    world_model.add_claims_to_kb(new_claim)
+                    claims_to_add_to_kb.append(new_claim)
                 else:
                     new_claim['status'] = 'VERIFIED'
-                    world_model.add_claims_to_kb(new_claim)
+                    claims_to_add_to_kb.append(new_claim)
                     verified_claims_for_log.append(new_claim)
 
-            print(f"--- Эксперт {assignee}: Задача выполнена, интегрировано {len(verified_claims_for_log)} непротиворечивых утверждений. ---")
+            # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ОДИН ВЫЗОВ ДЛЯ ВСЕХ УТВЕРЖДЕНИЙ ---
+            if claims_to_add_to_kb:
+                print(f"   [Эксперт {assignee}] -> Пакетно добавляю {len(claims_to_add_to_kb)} утверждений в Базу Знаний...")
+                world_model.add_claims_to_kb(claims_to_add_to_kb)
+            
+            print(f"--- Эксперт {assignee}: Задача выполнена, обработано {len(final_claims)} утверждений, из них {len(verified_claims_for_log)} непротиворечивых. ---")
             return verified_claims_for_log
 
     def _decompose_task(self, assignee: str, description: str, goal: str, context: dict) -> dict:

@@ -80,10 +80,11 @@ class SemanticIndex:
             if self._add_counter % self.save_every_n == 0:
                 self.save_to_disk(index_path, id_map_path)
         except Exception as e:
-            print(f"!!! ОШИБКА [SemanticIndex]: Не удалось добавить claim '{claim_id}'.")
-            print(f"   -> Тип ошибки: {type(e).__name__}, Сообщение: {e}")
-            print(f"   -> Traceback:\n{traceback.format_exc()}")
-            raise e
+            # Вместо того чтобы падать, мы логируем ошибку и продолжаем.
+            # Это предотвращает каскадный отказ всей задачи из-за временного сбоя API.
+            print(f"!!! ВНИМАНИЕ [SemanticIndex]: Не удалось получить эмбеддинг для claim '{claim_id}'. Он не будет добавлен в векторный поиск.")
+            print(f"   -> Причина: {type(e).__name__} - {e}")
+            # Мы НЕ пробрасываем ошибку `raise e` дальше. Сбой изолирован.
 
     def find_similar_claim_ids(self, query_text: str, top_k: int = 5) -> list[str]:
         if self.index.ntotal == 0:

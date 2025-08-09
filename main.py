@@ -215,6 +215,8 @@ def main():
             is_research_phase = any(kw in completed_phase_name.lower() for kw in ["разведка", "анализ", "исследование", "конкурент"])
             has_contrarian_task = world_model.has_task_for_assignee_in_phase(completed_phase_name, 'Contrarian_Expert')
 
+            world_model.save_state()
+
             if is_research_phase and not has_contrarian_task:
                 print(f"[Supervisor] -> Фаза '{completed_phase_name}' завершена. Запускаю обязательный контрарный аудит.")
                 
@@ -335,10 +337,11 @@ def main():
                 world_model.update_task_status(task_id, 'COMPLETED')
                 world_model.log_transaction({'task': task_to_run, 'results': claims})
             else:
-                # Если claims пустые, но ошибки не было, значит, эксперт ничего не нашел или был конфликт
-                # Статус задачи уже обновлен внутри execute_task, если нужно
-                # Просто логируем, что результат пустой
-                world_model.log_transaction({'task': task_to_run, 'results': "No new verified claims generated"})
+                # Если задача была, например, арбитражной, ее статус уже обновлен в памяти
+                # Проверяем, был ли он обновлен, чтобы не логировать пустоту
+                is_completed = any(task.get('task_id') == task_id and task.get('status') == 'COMPLETED' for phase in world_model.get_full_context()['dynamic_knowledge']['strategic_plan']['phases'] for task in phase['tasks'])
+                if not is_completed:
+                    world_model.log_transaction({'task': task_to_run, 'results': "No new verified claims generated"})
 
         except SearchAPIFailureError as e:
             print(f"!!! ОРКЕСТРАТОР: Произошла ошибка поиска при выполнении задачи {task_id}. Ошибка: {e}")
@@ -364,6 +367,9 @@ def main():
             print(f"!!! ОРКЕСТРАТОР: Произошла НЕПРЕДВИДЕННАЯ критическая ошибка при выполнении задачи {task_id}. Задача провалена. Ошибка: {e}")
             world_model.update_task_status(task_id, 'FAILED')
             world_model.log_transaction({'task': task_to_run, 'results': f"UNHANDLED CRITICAL ERROR: {e}"})
+        print("   [Оркестратор] Фиксирую изменения на диске...")
+        world_model.save_state()
+
         print(f"   [Оркестратор] Пауза после задачи на {TASK_COOLDOWN_SECONDS} секунд...")
         time.sleep(TASK_COOLDOWN_SECONDS)
 
@@ -451,6 +457,7 @@ def main():
         f.write(kb_report_content)
     print(f"-> Полный отчет по Базе Знаний сохранен в {kb_report_path}")
     # --- КОНЕЦ ---
+    world_model.save_state()
         
     print(f"\n--- РАБОТА УСПЕШНО ЗАВЕРШЕНА ---")
 
