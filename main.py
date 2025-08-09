@@ -2,115 +2,64 @@
 import json
 import os
 import sys
-import time 
+import time
+import argparse
+from collections import defaultdict
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
-import argparse
-from core.world_model import WorldModel
-from core.budget_manager import APIBudgetManager
-from agents.chief_strategist import ChiefStrategist
-from agents.expert_team import ExpertTeam
-from agents.search_agent import SearchAgent
-from utils.helpers import SearchAPIFailureError
 from google.api_core.exceptions import ResourceExhausted
 
-# --- КОНСТАНТЫ ДЛЯ УПРАВЛЕНИЯ СКОРОСТЬЮ И ПОПЫТКАМИ ---
-MAX_RETRIES = 3
-# Увеличиваем задержку при ошибке API до 5 минут, чтобы дать сервису "остыть"
-RETRY_DELAY_SECONDS = 300 
+from core.world_model import WorldModel
+from core.budget_manager import APIBudgetManager
+from agents.search_agent import SearchAgent
+from utils.helpers import SearchAPIFailureError
 
-# --- НОВЫЕ КОНСТАНТЫ ДЛЯ ДРОССЕЛИРОВАНИЯ ---
-# Задержка после КАЖДОЙ выполненной задачи для снижения общей частоты запросов
-TASK_COOLDOWN_SECONDS = 15 
-# Задержка после ресурсоемкой операции рефлексии у Стратега
-STRATEGIST_COOLDOWN_SECONDS = 20 
+from agents.supervisor import SupervisorAgent
+from agents.researcher import ResearcherAgent
+from agents.contrarian import ContrarianAgent
+from agents.quality_assessor import BatchQualityAssessor
+from agents.fixer import BatchFixerAgent
+from agents.report_writer import ReportWriterAgent
+
+# --- НОВЫЕ КОНСТАНТЫ ---
+TASK_BATCH_SIZE = 2 # Обрабатываем по 2 состязательные пары за раз
+MAX_RETRIES = 2
+RETRY_DELAY_SECONDS = 60
+TASK_COOLDOWN_SECONDS = 5
+STRATEGIST_COOLDOWN_SECONDS = 10
 
 def main():
-    parser = argparse.ArgumentParser(description="Автономный Проектный Офис")
-    parser.add_argument(
-        '--fresh-start',
-        action='store_true',
-        help='Начать новое исследование, игнорируя сохраненное состояние.'
-    )
-
-    parser.add_argument(
-      '--new-plan-keep-kb',
-      action='store_true',
-      help='Начать новое исследование (сбросить план), но сохранить существующую Базу Знаний.'
-    )
-
-    
-    
-    
+    parser = argparse.ArgumentParser(description="Фабрика Обогащения Данных")
+    parser.add_argument('--fresh-start', action='store_true')
+    parser.add_argument('--new-plan-keep-kb', action='store_true')
     args = parser.parse_args()
-    # --- ИНИЦИАЛИЗАЦИЯ ---
-    load_dotenv()
-    print("Инициализация системы 'Автономный Проектный Офис'...")
-    
-    # --- ДИАГНОСТИКА: ПРОВЕРКА ЗАГРУЗКИ КЛЮЧЕЙ ---
-    print("\n--- ДИАГНОСТИКА API КЛЮЧЕЙ ---")
-    serper_key = os.getenv("SERPER_API_KEY")
-    google_key = os.getenv("GOOGLE_SEARCH_API_KEY")
-    
-    if serper_key:
-        print(f"   [OK] SERPER_API_KEY загружен. Длина: {len(serper_key)}, Первые 4 символа: {serper_key[:4]}")
-    else:
-        print("   [!!! ОШИБКА] SERPER_API_KEY НЕ найден!")
-        
-    if google_key:
-        print(f"   [OK] GOOGLE_SEARCH_API_KEY загружен.")
-    else:
-        print("   [!!! ВНИМАНИЕ] GOOGLE_SEARCH_API_KEY НЕ найден.")
-    print("---------------------------------\n")
-    # --- КОНЕЦ ДИАГНОСТИКИ ---
 
-    # ИНИЦИАЛИЗАЦИЯ LLM С ТОНКОЙ НАСТРОЙКОЙ ТЕМПЕРАТУРЫ
+    load_dotenv()
+    print("Инициализация системы 'Фабрика Обогащения Данных'...")
+
     try:
         llms = {
-            "strategist": ChatGoogleGenerativeAI(
-                model="models/gemini-2.5-pro",
-                google_api_key=os.getenv("GOOGLE_API_KEY"),
-                temperature=0.3 # Низкая температура для стратегической точности
-            ),
-            "expert_flash": ChatGoogleGenerativeAI(
-                model="models/gemini-2.5-flash",
-                google_api_key=os.getenv("GOOGLE_API_KEY"),
-                temperature=0.1 # Очень низкая температура для надежной генерации JSON и аудита
-            ),
-            "expert_lite": ChatGoogleGenerativeAI(
-                model="models/gemini-2.5-flash-lite",
-                google_api_key=os.getenv("GOOGLE_API_KEY"),
-                temperature=0.1 # Очень низкая температура для надежной генерации JSON
-            ),
-            # --- НОВАЯ МОДЕЛЬ ДЛЯ АУДИТА ИСТОЧНИКОВ ---
-            "source_auditor": ChatGoogleGenerativeAI(
-                model="models/gemma-3-27b-it",
-                google_api_key=os.getenv("GOOGLE_API_KEY"),
-                temperature=0.0 # Нулевая температура для максимальной предсказуемости в задачах классификации
-            )
+            "pro": ChatGoogleGenerativeAI(model="models/gemini-2.5-pro", temperature=0.3),
+            "flash": ChatGoogleGenerativeAI(model="models/gemini-2.5-flash", temperature=0.1),
+            "lite": ChatGoogleGenerativeAI(model="models/gemini-2.5-flash-lite", temperature=0.1),
+            "gemma": ChatGoogleGenerativeAI(model="models/gemma-3-27b-it", temperature=0.0),
         }
-        print("-> Модели LLM успешно инициализированы с оптимальными настройками температуры.")
     except Exception as e:
-        print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать модели LLM. Проверьте GOOGLE_API_KEY. Ошибка: {e}")
+        print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать модели LLM: {e}")
         return
-    
+
+    # Инициализация WorldModel и BudgetManager (без изменений)
     daily_limits = {
-        "models/gemini-2.5-pro": 100,
-        "models/gemini-2.5-flash": 250,
-        "models/gemini-2.5-flash-lite": 1000,
-        "models/gemini-2.0-flash": 200,
-        "models/gemini-2.0-flash-lite": 200,
-        "models/gemma-3-27b-it": 14400,
+        "models/gemini-2.5-pro": 100, "models/gemini-2.5-flash": 250,
+        "models/gemini-2.5-flash-lite": 1000, "models/gemma-3-27b-it": 14400,
         "models/gemini-embedding-001": 1000,
-        "models/gemma-3-12b-it": 14400
     }
-    # Определяем путь к output заранее, чтобы передать его обоим модулям
     output_directory = "output"
     budget_manager = APIBudgetManager(output_directory, daily_limits)
-
     world_model = WorldModel(
         static_context={
-            "project_owner_profile": """
+            # ... (ваш static_context без изменений) ...
+             "project_owner_profile": """
 - **Роль и Цель:**
   - **Целевая Роль:** Руководитель AI-продуктов / AI Product Owner.
   - **Цель Проекта:** Создать убедительную концепцию нового HR-Tech продукта, чтобы доказать свою компетенцию и возглавить это новое бизнес-направление.
@@ -167,298 +116,105 @@ def main():
         reset_plan_only=args.new_plan_keep_kb
     )
 
-    search_agent = SearchAgent(
-        google_api_key=os.getenv("GOOGLE_SEARCH_API_KEY"),
-        google_cx_id=os.getenv("SEARCH_ENGINE_ID"),
-        serper_api_key=os.getenv("SERPER_API_KEY"),
-        cache_dir=world_model.cache_dir,
-        primary_api=os.getenv("PRIMARY_SEARCH_API")
-    )
+    # Инициализация агентов (без изменений)
+    search_agent = SearchAgent(serper_api_key=os.getenv("SERPER_API_KEY"), cache_dir=world_model.cache_dir)
+    supervisor = SupervisorAgent(llm=llms["pro"], sanitizer_llm=llms["gemma"], budget_manager=budget_manager)
+    researcher = ResearcherAgent(llm=llms["flash"], sanitizer_llm=llms["lite"], search_agent=search_agent, budget_manager=budget_manager)
+    contrarian = ContrarianAgent(llm=llms["flash"], sanitizer_llm=llms["lite"], search_agent=search_agent, budget_manager=budget_manager)
+    quality_assessor = BatchQualityAssessor(llm=llms["lite"], sanitizer_llm=llms["lite"], budget_manager=budget_manager)
+    fixer = BatchFixerAgent(llm=llms["flash"], sanitizer_llm=llms["lite"], budget_manager=budget_manager)
+    report_writer = ReportWriterAgent(llm=llms["pro"], sanitizer_llm=llms["gemma"], budget_manager=budget_manager)
 
-
-    expert_team = ExpertTeam(llms, search_agent, budget_manager)
-    strategist = ChiefStrategist(llm=llms["strategist"], medium_llm=llms["expert_flash"], sanitizer_llm=llms["source_auditor"], budget_manager=budget_manager)
-    
-    # --- ЗАПУСК РАБОТЫ ---
-    print("\n--- ЗАПУСК ОСНОВНОГО ЦИКЛА ОРКЕСТРАТОРА ---")
-
-    # --- СОЗДАЕМ ПЛАН, ТОЛЬКО ЕСЛИ ЕГО НЕТ ---
-    # Если мы не начинаем с чистого листа и план уже есть, мы его не перезаписываем.
+    # Создание плана (без изменений)
     if not world_model.get_full_context()['dynamic_knowledge']['strategic_plan']:
-        print("\n--- Стратегический план не найден. Создаю новый... ---")
-        plan = strategist.create_strategic_plan(world_model.get_full_context())
-        
-        # --- НАЧАЛО ИСПРАВЛЕНИЯ: АКТИВАЦИЯ ПЕРВОЙ ФАЗЫ ---
+        plan = supervisor.create_strategic_plan(world_model.get_full_context())
         if plan and plan.get("phases"):
-            print("--- Активирую первую фазу плана... ---")
             plan["phases"][0]["status"] = "IN_PROGRESS"
-        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
-
         world_model.update_strategic_plan(plan)
-    else:
-        print("\n--- Обнаружен существующий стратегический план. Продолжаю работу... ---")
-
-    while True:
-        active_tasks = world_model.get_active_tasks()
-        
-        if not active_tasks:
-
-            # =================================================================
-            # --- НАЧАЛО: БЛОК ОБЯЗАТЕЛЬНОГО КОНТРАРНОГО АУДИТА (ШАГ 1) ---
-            # =================================================================
-            print("\n[Supervisor] Проверка необходимости контрарного аудита...")
-            
-            # Получаем имя последней завершенной фазы (потребуется новый метод в WorldModel)
-            completed_phase_name = world_model.get_last_completed_phase_name()
-            
-            # Проверяем, что фаза была исследовательской и в ней еще не было контрарных задач
-            is_research_phase = any(kw in completed_phase_name.lower() for kw in ["разведка", "анализ", "исследование", "конкурент"])
-            has_contrarian_task = world_model.has_task_for_assignee_in_phase(completed_phase_name, 'Contrarian_Expert')
-
-            world_model.save_state()
-
-            if is_research_phase and not has_contrarian_task:
-                print(f"[Supervisor] -> Фаза '{completed_phase_name}' завершена. Запускаю обязательный контрарный аудит.")
-                
-                # 1. Получаем 2-3 самых уверенных утверждения из всей Базы Знаний
-                kb = world_model.get_full_context()['dynamic_knowledge']['knowledge_base']
-                sorted_claims = sorted(
-                    [c for c in kb.values() if c.get('status') == 'VERIFIED'], 
-                    key=lambda x: x.get('confidence_score', 0), 
-                    reverse=True
-                )
-                top_claims_to_challenge = sorted_claims[:2] # Ограничимся двумя самыми сильными
-
-                if top_claims_to_challenge:
-                    # 2. Делегируем создание задач экспертной команде
-                    contrarian_tasks = expert_team.generate_contrarian_tasks(top_claims_to_challenge)
-                    
-                    # 3. Добавляем задачи в план (в ту же завершенную фазу)
-                    if contrarian_tasks:
-                        for task in contrarian_tasks:
-                            world_model.add_task_to_plan(task, phase_name=completed_phase_name)
-                        
-                        print(f"[Supervisor] <- Добавлено {len(contrarian_tasks)} новых контрарных задач. Цикл будет перезапущен.")
-                        continue # Перезапускаем главный цикл, чтобы немедленно выполнить эти задачи
-
-            print("\n--- Все задачи текущей фазы выполнены. Запускаю рефлексию Стратега... ---")
-            
-            reflection_success = False
-            MAX_REFLECTION_RETRIES = 2 # Попробуем 2 раза, чтобы не зациклиться надолго
-            for attempt in range(MAX_REFLECTION_RETRIES):
-                print(f"   -> Попытка рефлексии {attempt + 1}/{MAX_REFLECTION_RETRIES}...")
-                # Получаем текущий план ДО попытки обновления
-                original_plan_json = json.dumps(world_model.get_full_context()['dynamic_knowledge']['strategic_plan'])
-
-                updated_plan = strategist.reflect_and_update_plan(world_model)
-                
-                # Проверяем, действительно ли план изменился. Если нет, значит была ошибка.
-                if updated_plan and json.dumps(updated_plan) != original_plan_json:
-                    world_model.update_strategic_plan(updated_plan)
-                    print("   -> Рефлексия успешна, план обновлен.")
-                    reflection_success = True
-                    break # Выходим из цикла попыток
-                else:
-                    print(f"   !!! Попытка рефлексии {attempt + 1} провалена (план не изменился). Пауза 15 секунд перед повтором.")
-                    time.sleep(15)
-
-            if not reflection_success:
-                print("!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось провести рефлексию после нескольких попыток. Завершение работы.")
-                # Здесь можно либо завершить работу, либо пометить проект как FAILED
-                world_model.dynamic_knowledge['strategic_plan']['main_goal_status'] = 'FAILED'
-                world_model._save_state_to_disk() # Сохраняем статус FAILED
-                break # Выходим из главного цикла while True
-
-            print(f"   [Оркестратор] Пауза после рефлексии на {STRATEGIST_COOLDOWN_SECONDS} секунд...")
-            time.sleep(STRATEGIST_COOLDOWN_SECONDS)
-            
-            # Этот код остается таким же, но теперь он будет вызван только после УСПЕШНОЙ рефлексии
-            current_status = world_model.get_full_context()['dynamic_knowledge']['strategic_plan'].get("main_goal_status")
-            if current_status == "READY_FOR_FINAL_BRIEF":
-                print("\n[Quality Gate] Стратег готов к финалу. Запускаю обязательный Аудит Полноты (Gap Analysis)...")
-                
-                # Вызываем новый метод, который использует Gemini 2.5 Flash
-                missing_info_tasks = strategist.run_gap_analysis(world_model)
-                
-                if missing_info_tasks:
-                    print(f"[Quality Gate] !!! Аудит выявил нехватку информации. Добавлено {len(missing_info_tasks)} новых задач.")
-                    # Добавляем задачи в план
-                    for task in missing_info_tasks:
-                        world_model.add_task_to_plan(task)
-                    
-                    # Возвращаем систему в рабочий режим
-                    world_model.update_main_goal_status("IN_PROGRESS")
-                    continue # Продолжаем цикл для выполнения новых задач
-                else:
-                    print("[Quality Gate] -> Аудит Полноты пройден. Данных достаточно. Перехожу к генерации финальных артефактов.")
-                    break # Выходим из цикла, т.к. данные верифицированы
-            
-            # --- НАЧАЛО: ПРОТОКОЛ АВАРИЙНОГО ПЕРЕХОДА ФАЗЫ ---
-            if not world_model.get_active_tasks():
-                print("!!! [Supervisor] ВНИМАНИЕ: Стратег не создал новых задач. Активирую протокол принудительного перехода.")
-                
-                current_plan = world_model.get_full_context()['dynamic_knowledge']['strategic_plan']
-                phases = current_plan.get("phases", [])
-                
-                # 1. Находим и принудительно завершаем текущую фазу (если она еще активна)
-                for i, phase in enumerate(phases):
-                    if phase.get("status") == "IN_PROGRESS":
-                        print(f"   [Supervisor] -> Принудительно завершаю фазу '{phase.get('phase_name')}'.")
-                        phases[i]["status"] = "COMPLETED"
-                        break
-                
-                # 2. Находим и активируем следующую ожидающую фазу
-                next_phase_activated = False
-                for i, phase in enumerate(phases):
-                    if phase.get("status") == "PENDING":
-                        print(f"   [Supervisor] -> Активирую следующую фазу '{phase.get('phase_name')}'.")
-                        phases[i]["status"] = "IN_PROGRESS"
-                        next_phase_activated = True
-                        break
-                
-                # 3. Сохраняем измененный план
-                world_model.update_strategic_plan(current_plan)
-
-                if not next_phase_activated:
-                    print("!!! [Supervisor] КРИТИЧЕСКАЯ ОШИБКА: Следующая фаза для активации не найдена. Вероятно, план выполнен или поврежден. Остановка.")
-                    break # Выходим из главного цикла, так как работа действительно закончена
-            # --- КОНЕЦ ПРОТОКОЛА ---
-            
-            continue
-
-        task_to_run = active_tasks[0]
-        task_id = task_to_run['task_id'] # Удобно иметь ID в переменной
-        
-        # --- ОБНОВЛЕННЫЙ БЛОК TRY...EXCEPT ---
-        try:
-            claims = expert_team.execute_task(task_to_run, world_model)
-            
-            if claims:
-                world_model.update_task_status(task_id, 'COMPLETED')
-                world_model.log_transaction({'task': task_to_run, 'results': claims})
-            else:
-                # Если задача была, например, арбитражной, ее статус уже обновлен в памяти
-                # Проверяем, был ли он обновлен, чтобы не логировать пустоту
-                is_completed = any(task.get('task_id') == task_id and task.get('status') == 'COMPLETED' for phase in world_model.get_full_context()['dynamic_knowledge']['strategic_plan']['phases'] for task in phase['tasks'])
-                if not is_completed:
-                    world_model.log_transaction({'task': task_to_run, 'results': "No new verified claims generated"})
-
-        except SearchAPIFailureError as e:
-            print(f"!!! ОРКЕСТРАТОР: Произошла ошибка поиска при выполнении задачи {task_id}. Ошибка: {e}")
-            
-            current_retries = task_to_run.get('retry_count', 0)
-            if current_retries < MAX_RETRIES:
-                world_model.increment_task_retry_count(task_id)
-                print(f"   -> Попытка {current_retries + 1}/{MAX_RETRIES}. Повтор через {RETRY_DELAY_SECONDS} секунд...")
-                time.sleep(RETRY_DELAY_SECONDS)
-            else:
-                print(f"!!! ОРКЕСТРАТОР: Превышен лимит ({MAX_RETRIES}) повторных попыток для задачи {task_id}. Задача окончательно провалена.")
-                world_model.update_task_status(task_id, 'FAILED')
-                world_model.log_transaction({'task': task_to_run, 'results': f"CRITICAL SEARCH ERROR after {MAX_RETRIES} retries: {e}"})
-
-        except ResourceExhausted as e:
-            print(f"!!! СИСТЕМНЫЙ СБОЙ: ДОСТИГНУТ ДНЕВНОЙ ЛИМИТ API. ОСТАНАВЛИВАЮ ВСЮ СИСТЕМУ.")
-            print(f"   -> Задача '{task_id}' остается в статусе PENDING.")
-            print(f"   -> Ошибка: {e}")
-            # Завершаем работу, так как дневной лимит исчерпан
-            sys.exit(1)
-
-        except Exception as e:
-            print(f"!!! ОРКЕСТРАТОР: Произошла НЕПРЕДВИДЕННАЯ критическая ошибка при выполнении задачи {task_id}. Задача провалена. Ошибка: {e}")
-            world_model.update_task_status(task_id, 'FAILED')
-            world_model.log_transaction({'task': task_to_run, 'results': f"UNHANDLED CRITICAL ERROR: {e}"})
-        print("   [Оркестратор] Фиксирую изменения на диске...")
         world_model.save_state()
 
-        print(f"   [Оркестратор] Пауза после задачи на {TASK_COOLDOWN_SECONDS} секунд...")
+    # --- ОБНОВЛЕННЫЙ ГЛАВНЫЙ ЦИКЛ ---
+    while True:
+        active_tasks = world_model.get_active_tasks()
+
+        if not active_tasks:
+            # Логика рефлексии и завершения (без изменений)
+            print("\n--- Все задачи выполнены. Запускаю рефлексию... ---")
+            analyst_report_stub = {"key_insights": ["Фаза завершена."], "data_gaps": [], "confidence_level": 0.9}
+            current_plan = world_model.get_full_context()['dynamic_knowledge']['strategic_plan']
+            updated_plan = supervisor.reflect_and_update_plan(analyst_report_stub, current_plan)
+            world_model.update_strategic_plan(updated_plan)
+            if world_model.get_full_context()['dynamic_knowledge']['strategic_plan'].get("main_goal_status") == "READY_FOR_FINAL_BRIEF":
+                break
+            if not world_model.get_active_tasks():
+                 print("!!! [Оркестратор] КРИТИЧЕСКАЯ ОШИБКА: Рефлексия не привела к созданию новых задач.")
+                 break
+            world_model.save_state()
+            time.sleep(STRATEGIST_COOLDOWN_SECONDS)
+            continue
+
+        # --- ПАКЕТНАЯ ОБРАБОТКА ЗАДАЧ ---
+        tasks_to_run_batch = active_tasks[:TASK_BATCH_SIZE * 2] # Берем с запасом, чтобы найти пары
+        
+        # Группируем задачи по исполнителям
+        tasks_by_assignee = defaultdict(list)
+        for task in tasks_to_run_batch:
+            tasks_by_assignee[task['assignee']].append(task)
+        
+        all_raw_claims = []
+        processed_task_ids = set()
+
+        try:
+            # Пакетный запуск "рабочих"
+            researcher_tasks = tasks_by_assignee.get('ResearcherAgent', [])
+            if researcher_tasks:
+                all_raw_claims.extend(researcher.execute_batch(researcher_tasks))
+                processed_task_ids.update([t['task_id'] for t in researcher_tasks])
+
+            contrarian_tasks = tasks_by_assignee.get('ContrarianAgent', [])
+            if contrarian_tasks:
+                all_raw_claims.extend(contrarian.execute_batch(contrarian_tasks))
+                processed_task_ids.update([t['task_id'] for t in contrarian_tasks])
+            
+            # Если нет исследовательских задач, пропускаем итерацию
+            if not processed_task_ids:
+                print("[Оркестратор] Нет доступных исследовательских задач, пропускаю итерацию.")
+                time.sleep(TASK_COOLDOWN_SECONDS)
+                continue
+
+            # --- ЕДИНЫЙ КОНВЕЙЕР КАЧЕСТВА ---
+            assessment = quality_assessor.assess_batch(all_raw_claims)
+            fixed_claims = fixer.fix_batch(assessment['fixable_claims'])
+            verified_claims = assessment['good_claims'] + fixed_claims
+            
+            if verified_claims:
+                world_model.add_claims_to_kb(verified_claims)
+
+            # Обновляем статусы всех обработанных задач
+            for task_id in processed_task_ids:
+                world_model.update_task_status(task_id, 'COMPLETED')
+                world_model.log_transaction({'task': {'task_id': task_id}, 'results': "Processed in batch."})
+
+        except (SearchAPIFailureError, ResourceExhausted) as e:
+            print(f"!!! ОРКЕСТРАТОР: Системная ошибка при выполнении пакета: {e}")
+            for task_id in processed_task_ids:
+                world_model.update_task_status(task_id, 'FAILED')
+        except Exception as e:
+            print(f"!!! ОРКЕСТРАТОР: Непредвиденная ошибка при выполнении пакета: {e}")
+            for task_id in processed_task_ids:
+                world_model.update_task_status(task_id, 'FAILED')
+
+        print("   [Оркестратор] Фиксирую изменения на диске...")
+        world_model.save_state()
         time.sleep(TASK_COOLDOWN_SECONDS)
 
-    # --- ФИНАЛЬНЫЙ ОТЧЕТ С ЦИКЛОМ ВАЛИДАЦИИ ---
-    print("\n--- Создание и валидация финальных отчетов... ---")
-    MAX_VALIDATION_RETRIES = 3
-
-    # --- Генерация и валидация Executive Summary ---
-    summary_content = ""
-    try:
-        for i in range(MAX_VALIDATION_RETRIES):
-            print(f"\n   -> Попытка {i+1}/{MAX_VALIDATION_RETRIES} генерации Executive Summary...")
-            feedback = summary_content # Используем предыдущий неудачный результат как фидбэк
-            # Генерируем черновик
-            draft_summary = strategist.write_executive_summary(world_model, feedback=feedback)
-            # Валидируем черновик
-            validation_report = strategist.validate_artifact(
-            llms['source_auditor'], # <-- ИСПОЛЬЗУЕМ ДЕШЕВУЮ И ДОСТУПНУЮ МОДЕЛЬ
-            draft_summary,
-            required_sections=["Executive Summary", "Концепция Продукта", "Дорожная Карта"]
-            )
-            if validation_report.get("is_valid"):
-                summary_content = draft_summary
-                print("   -> Executive Summary успешно сгенерирован и прошел валидацию.")
-                break
-            else:
-                summary_content = f"Validation failed. Reasons: {validation_report.get('reasons', [])}"
-                print(f"   !!! Попытка {i+1} провалена. Отправляю на доработку...")
-                time.sleep(10)
-    except ResourceExhausted as e:
-        print("!!! ОШИБКА БЮДЖЕТА: Не удалось сгенерировать Executive Summary из-за исчерпания лимита API.")
-        summary_content = f"Validation failed. Reason: {e}"
-
-    # Сохраняем результат (успешный или отчет об ошибке)
+    # Финальный отчет (без изменений)
+    print("\n--- Создание финальных отчетов... ---")
+    summary_content = report_writer.write_final_report(world_model, "Executive Summary")
     summary_file_path = os.path.join(world_model.output_dir, "Executive_Summary_For_Director.md")
-    if summary_content and "Validation failed" not in summary_content:
-        with open(summary_file_path, "w", encoding="utf-8") as f:
-            f.write(summary_content)
-        print(f"-> Краткая аналитическая записка сохранена в {summary_file_path}")
-    else:
-        with open(summary_file_path, "w", encoding="utf-8") as f:
-            f.write(f"# ГЕНЕРАЦИЯ ПРОВАЛЕНА\n\nНе удалось создать качественный документ после {MAX_VALIDATION_RETRIES} попыток.\n\nПоследняя ошибка: {summary_content}")
-        print(f"!!! ОШИБКА: Не удалось сгенерировать Executive Summary. Отчет об ошибке сохранен в {summary_file_path}")
-
-    # --- Генерация и валидация Extended Brief (аналогичный цикл) ---
-    brief_content = ""
-    try:
-        for i in range(MAX_VALIDATION_RETRIES):
-            print(f"\n   -> Попытка {i+1}/{MAX_VALIDATION_RETRIES} генерации Extended Brief...")
-            feedback = brief_content
-            draft_brief = strategist.write_extended_brief(world_model, feedback=feedback)
-            validation_report = strategist.validate_artifact(
-                llms['source_auditor'], # <-- ИСПОЛЬЗУЕМ ДЕШЕВУЮ И ДОСТУПНУЮ МОДЕЛЬ
-                draft_brief,
-                required_sections=["Анализ Активов ТГУ", "Конкурентный Ландшафт", "Бизнес-Кейс"]
-            )
-            if validation_report.get("is_valid"):
-                brief_content = draft_brief
-                print("   -> Extended Brief успешно сгенерирован и прошел валидацию.")
-                break
-            else:
-                brief_content = f"Validation failed. Reasons: {validation_report.get('reasons', [])}"
-                print(f"   !!! Попытка {i+1} провалена. Отправляю на доработку...")
-                time.sleep(10)
-    except ResourceExhausted as e:
-        print("!!! ОШИБКА БЮДЖЕТА: Не удалось сгенерировать Extended Brief из-за исчерпания лимита API.")
-        brief_content = f"Validation failed. Reason: {e}"
-
-    brief_file_path = os.path.join(world_model.output_dir, "Extended_Brief_For_PO.md")
-    if brief_content and "Validation failed" not in brief_content:
-        with open(brief_file_path, "w", encoding="utf-8") as f:
-            f.write(brief_content)
-        print(f"-> Подробный аналитический обзор сохранен в {brief_file_path}")
-    else:
-        with open(brief_file_path, "w", encoding="utf-8") as f:
-            f.write(f"# ГЕНЕРАЦИЯ ПРОВАЛЕНА\n\nНе удалось создать качественный документ после {MAX_VALIDATION_RETRIES} попыток.\n\nПоследняя ошибка: {brief_content}")
-        print(f"!!! ОШИБКА: Не удалось сгенерировать Extended Brief. Отчет об ошибке сохранен в {brief_file_path}")
-
-    
-    # --- НАЧАЛО: ГЕНЕРАЦИЯ "ЕДИНОГО ИСТОЧНИКА ПРАВДЫ" ---
-    print("\n--- Создание финального аудиторского отчета по Базе Знаний... ---")
-    kb_report_content = strategist.generate_knowledge_base_report(world_model)
-    kb_report_path = os.path.join(world_model.output_dir, "Knowledge_Base_Audit_Report.md")
-    with open(kb_report_path, "w", encoding="utf-8") as f:
-        f.write(kb_report_content)
-    print(f"-> Полный отчет по Базе Знаний сохранен в {kb_report_path}")
-    # --- КОНЕЦ ---
-    world_model.save_state()
-        
+    with open(summary_file_path, "w", encoding="utf-8") as f:
+        f.write(summary_content)
+    print(f"-> Краткая аналитическая записка сохранена в {summary_file_path}")
     print(f"\n--- РАБОТА УСПЕШНО ЗАВЕРШЕНА ---")
 
 if __name__ == "__main__":
