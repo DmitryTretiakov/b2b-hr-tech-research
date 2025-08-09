@@ -37,3 +37,5 @@ class GraphState(TypedDict):
     # Поля для передачи результатов между узлами
     current_task_result: Optional[Dict]
     error_message: Optional[str]
+
+    node_outputs: Dict[str, List] # e.g., {'researcher': [...], 'fixer': [...]}
