@@ -79,3 +79,22 @@ class ValidationReport(BaseModel):
     """Описывает результат проверки артефакта на качество."""
     is_valid: bool = Field(description="True, если артефакт прошел все проверки, иначе False.")
     reasons: List[str] = Field(description="Список конкретных причин, по которым артефакт был признан невалидным. Пустой, если is_valid=True.")
+
+# Модели для структурированного синтеза от Аналитика
+class SynthesizedInsight(BaseModel):
+    """Один конкретный вывод или инсайт, подкрепленный фактом."""
+    text: str = Field(description="Текст вывода или инсайта.")
+    source_claim_id: str = Field(description="ID ключевого утверждения из Базы Знаний, на котором основан этот вывод.")
+
+class ReportSection(BaseModel):
+    """Структурированное содержимое для одного раздела отчета."""
+    title: str = Field(description="Заголовок раздела, например 'Анализ Рынка и Ключевая Возможность'.")
+    insights: List[SynthesizedInsight] = Field(description="Список ключевых инсайтов для этого раздела.")
+
+class FullSynthesisReport(BaseModel):
+    """Полный структурированный набор данных для генерации финального отчета."""
+    executive_summary: ReportSection
+    market_analysis: ReportSection
+    product_concept: ReportSection
+    competitive_landscape: ReportSection
+    business_case: ReportSection

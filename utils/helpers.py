@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from google.api_core.exceptions import ResourceExhausted
 from core.budget_manager import APIBudgetManager
 from pydantic import ValidationError
+from collections import OrderedDict
 
 # --- НОВОЕ КАСТОМНОЕ ИСКЛЮЧЕНИЕ ---
 class SearchAPIFailureError(Exception):
@@ -407,3 +408,44 @@ def validate_artifact_citations(artifact_content: str, knowledge_base: dict) -> 
     
     print(f"      [Citation Auditor] <- Аудит успешен. Все {len(found_citations)} цитат корректны.")
     return {"is_valid": True, "reason": "Все цитаты корректны."}
+
+def citation_post_processor(markdown_text: str, knowledge_base: dict) -> str:
+    """
+    Находит маркеры [CITE:claim_id], заменяет их на сноски и генерирует
+    список источников в конце документа. Это детерминированная функция.
+    """
+    print("   [PostProcessor] -> Обрабатываю цитаты в финальном отчете...")
+    
+    # Находим все уникальные ID в порядке их появления
+    found_ids = re.findall(r'\[CITE:([\w_,-]+)\]', markdown_text)
+    unique_ids_in_order = list(OrderedDict.fromkeys(found_ids))
+    
+    if not unique_ids_in_order:
+        print("   [PostProcessor] <- Цитаты не найдены. Возвращаю текст без изменений.")
+        return markdown_text
+
+    # Создаем карту ID -> номер сноски
+    citation_map = {claim_id: i + 1 for i, claim_id in enumerate(unique_ids_in_order)}
+
+    # Заменяем маркеры на сноски
+    def replace_marker(match):
+        claim_id = match.group(1)
+        citation_number = citation_map.get(claim_id)
+        return f"[^{citation_number}]" if citation_number else "[ЦИТАТА НЕ НАЙДЕНА]"
+
+    processed_text = re.sub(r'\[CITE:([\w_,-]+)\]', replace_marker, markdown_text)
+
+    # Генерируем список источников
+    references_list = ["\n\n---\n\n## Список Источников\n"]
+    for claim_id, number in citation_map.items():
+        claim_data = knowledge_base.get(claim_id)
+        if claim_data:
+            source_link = claim_data.get('source_link', '#')
+            statement = claim_data.get('statement', 'Утверждение не найдено.')
+            references_list.append(f"[^{number}]: {statement} ([Источник]({source_link}))")
+        else:
+            references_list.append(f"[^{number}]: Ошибка: Утверждение с ID '{claim_id}' не найдено в Базе Знаний.")
+    
+    final_text = processed_text + "\n".join(references_list)
+    print(f"   [PostProcessor] <- Обработка завершена. Добавлено {len(unique_ids_in_order)} сносок.")
+    return final_text

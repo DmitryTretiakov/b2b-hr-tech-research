@@ -1,7 +1,5 @@
 # main.py
-import json
 import os
-import sys
 import time
 import argparse
 from collections import defaultdict
@@ -12,17 +10,17 @@ from google.api_core.exceptions import ResourceExhausted
 from core.world_model import WorldModel
 from core.budget_manager import APIBudgetManager
 from agents.search_agent import SearchAgent
-from utils.helpers import SearchAPIFailureError
+from utils.helpers import SearchAPIFailureError, citation_post_processor # ИМПОРТ НОВОЙ ФУНКЦИИ
 
 from agents.supervisor import SupervisorAgent
 from agents.researcher import ResearcherAgent
 from agents.contrarian import ContrarianAgent
 from agents.quality_assessor import BatchQualityAssessor
 from agents.fixer import BatchFixerAgent
+from agents.analyst import AnalystAgent # ИМПОРТ АНАЛИТИКА
 from agents.report_writer import ReportWriterAgent
 
-# --- НОВЫЕ КОНСТАНТЫ ---
-TASK_BATCH_SIZE = 2 # Обрабатываем по 2 состязательные пары за раз
+TASK_BATCH_SIZE = 2
 MAX_RETRIES = 2
 RETRY_DELAY_SECONDS = 60
 TASK_COOLDOWN_SECONDS = 5
@@ -31,11 +29,11 @@ STRATEGIST_COOLDOWN_SECONDS = 10
 def main():
     parser = argparse.ArgumentParser(description="Фабрика Обогащения Данных")
     parser.add_argument('--fresh-start', action='store_true')
-    parser.add_argument('--new-plan-keep-kb', action='store_true')
+    parser.add_argument('--new-plan-keep-kb', action='to_plan_only')
     args = parser.parse_args()
 
     load_dotenv()
-    print("Инициализация системы 'Фабрика Обогащения Данных'...")
+    print("Инициализация системы 'Фабрика Обогащения Данных' v3.0...")
 
     try:
         llms = {
@@ -48,7 +46,7 @@ def main():
         print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать модели LLM: {e}")
         return
 
-    # Инициализация WorldModel и BudgetManager (без изменений)
+    # Инициализация WorldModel и BudgetManager
     daily_limits = {
         "models/gemini-2.5-pro": 100, "models/gemini-2.5-flash": 250,
         "models/gemini-2.5-flash-lite": 1000, "models/gemma-3-27b-it": 14400,
@@ -116,16 +114,17 @@ def main():
         reset_plan_only=args.new_plan_keep_kb
     )
 
-    # Инициализация агентов (без изменений)
+    # Инициализация агентов
     search_agent = SearchAgent(serper_api_key=os.getenv("SERPER_API_KEY"), cache_dir=world_model.cache_dir)
     supervisor = SupervisorAgent(llm=llms["pro"], sanitizer_llm=llms["gemma"], budget_manager=budget_manager)
     researcher = ResearcherAgent(llm=llms["flash"], sanitizer_llm=llms["lite"], search_agent=search_agent, budget_manager=budget_manager)
     contrarian = ContrarianAgent(llm=llms["flash"], sanitizer_llm=llms["lite"], search_agent=search_agent, budget_manager=budget_manager)
     quality_assessor = BatchQualityAssessor(llm=llms["lite"], sanitizer_llm=llms["lite"], budget_manager=budget_manager)
     fixer = BatchFixerAgent(llm=llms["flash"], sanitizer_llm=llms["lite"], budget_manager=budget_manager)
+    analyst = AnalystAgent(llm=llms["pro"], sanitizer_llm=llms["gemma"], budget_manager=budget_manager) # ИНИЦИАЛИЗАЦИЯ АНАЛИТИКА
     report_writer = ReportWriterAgent(llm=llms["pro"], sanitizer_llm=llms["gemma"], budget_manager=budget_manager)
 
-    # Создание плана (без изменений)
+    # Создание плана
     if not world_model.get_full_context()['dynamic_knowledge']['strategic_plan']:
         plan = supervisor.create_strategic_plan(world_model.get_full_context())
         if plan and plan.get("phases"):
@@ -133,17 +132,22 @@ def main():
         world_model.update_strategic_plan(plan)
         world_model.save_state()
 
-    # --- ОБНОВЛЕННЫЙ ГЛАВНЫЙ ЦИКЛ ---
+    # Главный цикл
     while True:
         active_tasks = world_model.get_active_tasks()
 
         if not active_tasks:
-            # Логика рефлексии и завершения (без изменений)
-            print("\n--- Все задачи выполнены. Запускаю рефлексию... ---")
-            analyst_report_stub = {"key_insights": ["Фаза завершена."], "data_gaps": [], "confidence_level": 0.9}
+            print("\n--- Все задачи выполнены. Запускаю декомпозированную рефлексию... ---")
+            
+            # ЭТАП 1: АНАЛИЗ
+            kb = world_model.get_full_context()['dynamic_knowledge']['knowledge_base']
+            analyst_report = analyst.run_reflection_analysis(kb)
+            
+            # ЭТАП 2: ПЛАНИРОВАНИЕ
             current_plan = world_model.get_full_context()['dynamic_knowledge']['strategic_plan']
-            updated_plan = supervisor.reflect_and_update_plan(analyst_report_stub, current_plan)
+            updated_plan = supervisor.reflect_and_update_plan(analyst_report, current_plan)
             world_model.update_strategic_plan(updated_plan)
+
             if world_model.get_full_context()['dynamic_knowledge']['strategic_plan'].get("main_goal_status") == "READY_FOR_FINAL_BRIEF":
                 break
             if not world_model.get_active_tasks():
@@ -153,19 +157,14 @@ def main():
             time.sleep(STRATEGIST_COOLDOWN_SECONDS)
             continue
 
-        # --- ПАКЕТНАЯ ОБРАБОТКА ЗАДАЧ ---
-        tasks_to_run_batch = active_tasks[:TASK_BATCH_SIZE * 2] # Берем с запасом, чтобы найти пары
-        
-        # Группируем задачи по исполнителям
+        # Пакетная обработка задач (без изменений)
+        tasks_to_run_batch = active_tasks[:TASK_BATCH_SIZE * 2]
         tasks_by_assignee = defaultdict(list)
         for task in tasks_to_run_batch:
             tasks_by_assignee[task['assignee']].append(task)
         
-        all_raw_claims = []
-        processed_task_ids = set()
-
+        all_raw_claims, processed_task_ids = [], set()
         try:
-            # Пакетный запуск "рабочих"
             researcher_tasks = tasks_by_assignee.get('ResearcherAgent', [])
             if researcher_tasks:
                 all_raw_claims.extend(researcher.execute_batch(researcher_tasks))
@@ -176,13 +175,10 @@ def main():
                 all_raw_claims.extend(contrarian.execute_batch(contrarian_tasks))
                 processed_task_ids.update([t['task_id'] for t in contrarian_tasks])
             
-            # Если нет исследовательских задач, пропускаем итерацию
             if not processed_task_ids:
-                print("[Оркестратор] Нет доступных исследовательских задач, пропускаю итерацию.")
                 time.sleep(TASK_COOLDOWN_SECONDS)
                 continue
 
-            # --- ЕДИНЫЙ КОНВЕЙЕР КАЧЕСТВА ---
             assessment = quality_assessor.assess_batch(all_raw_claims)
             fixed_claims = fixer.fix_batch(assessment['fixable_claims'])
             verified_claims = assessment['good_claims'] + fixed_claims
@@ -190,31 +186,40 @@ def main():
             if verified_claims:
                 world_model.add_claims_to_kb(verified_claims)
 
-            # Обновляем статусы всех обработанных задач
             for task_id in processed_task_ids:
                 world_model.update_task_status(task_id, 'COMPLETED')
                 world_model.log_transaction({'task': {'task_id': task_id}, 'results': "Processed in batch."})
 
         except (SearchAPIFailureError, ResourceExhausted) as e:
             print(f"!!! ОРКЕСТРАТОР: Системная ошибка при выполнении пакета: {e}")
-            for task_id in processed_task_ids:
-                world_model.update_task_status(task_id, 'FAILED')
+            for task_id in processed_task_ids: world_model.update_task_status(task_id, 'FAILED')
         except Exception as e:
             print(f"!!! ОРКЕСТРАТОР: Непредвиденная ошибка при выполнении пакета: {e}")
-            for task_id in processed_task_ids:
-                world_model.update_task_status(task_id, 'FAILED')
+            for task_id in processed_task_ids: world_model.update_task_status(task_id, 'FAILED')
 
         print("   [Оркестратор] Фиксирую изменения на диске...")
         world_model.save_state()
         time.sleep(TASK_COOLDOWN_SECONDS)
 
-    # Финальный отчет (без изменений)
-    print("\n--- Создание финальных отчетов... ---")
-    summary_content = report_writer.write_final_report(world_model, "Executive Summary")
-    summary_file_path = os.path.join(world_model.output_dir, "Executive_Summary_For_Director.md")
-    with open(summary_file_path, "w", encoding="utf-8") as f:
-        f.write(summary_content)
-    print(f"-> Краткая аналитическая записка сохранена в {summary_file_path}")
+    # --- НОВЫЙ КОНВЕЙЕР ГЕНЕРАЦИИ ФИНАЛЬНОГО ОТЧЕТА ---
+    print("\n--- Запускаю конвейер генерации финального отчета ---")
+    
+    # 1. Синтез
+    kb = world_model.get_full_context()['dynamic_knowledge']['knowledge_base']
+    synthesis_data = analyst.run_final_synthesis(kb)
+    
+    # 2. Написание
+    raw_markdown = report_writer.write_final_report(synthesis_data)
+    
+    # 3. Детерминированная пост-обработка
+    final_markdown = citation_post_processor(raw_markdown, kb)
+    
+    # 4. Сохранение
+    report_path = os.path.join(world_model.output_dir, "Executive_Summary_For_Director.md")
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(final_markdown)
+    print(f"-> Финальный отчет с верифицированными цитатами сохранен в {report_path}")
+
     print(f"\n--- РАБОТА УСПЕШНО ЗАВЕРШЕНА ---")
 
 if __name__ == "__main__":
