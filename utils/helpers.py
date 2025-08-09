@@ -1,257 +1,19 @@
 # utils/helpers.py
-import os
-import requests
-import re
 import json
+import re
 import time
-from serpapi import SerpApiClient
-import time
-from langchain.output_parsers import PydanticOutputParser
-from langchain_google_genai import ChatGoogleGenerativeAI
-from pydantic import BaseModel
-from google.api_core.exceptions import ResourceExhausted
-from core.budget_manager import APIBudgetManager
-from pydantic import ValidationError
 from collections import OrderedDict
-
-# --- НОВОЕ КАСТОМНОЕ ИСКЛЮЧЕНИЕ ---
-class SearchAPIFailureError(Exception):
-    """Исключение, выбрасываемое, когда все поисковые API не смогли вернуть результат."""
-    pass
-
-def robust_hybrid_search(query: str, num_results: int = 10) -> dict:
-    """
-    Выполняет поиск, используя Serper (через requests) как основной API и Google как резервный.
-    """
-    # --- Попытка №1: Основной API (Serper) с использованием requests ---
-    serper_api_key = os.getenv("SERPER_API_KEY") # Убедитесь, что имя в .env совпадает!
-
-    # --- ДИАГНОСТИКА: ПРОВЕРКА КЛЮЧА ВНУТРИ ФУНКЦИИ ---
-    print(f"\n--- ДИАГНОСТИКА ВНУТРИ robust_hybrid_search ---")
-    print(f"   Запрос: '{query}'")
-    if serper_api_key:
-        print(f"   [OK] Ключ SERPER_API_KEY доступен внутри функции.")
-    else:
-        print("   [!!! ОШИБКА] Ключ SERPER_API_KEY НЕ доступен внутри функции (равен None).")
-    print("------------------------------------------\n")
-    # --- КОНЕЦ ДИАГНОСТИКИ ---
-
-    if serper_api_key:
-        print(f"    -> [Поиск Serper] Выполняю POST-запрос: '{query}'...")
-        url = "https://google.serper.dev/search"
-        payload = json.dumps({"q": query, "num": num_results, "gl": "ru", "hl": "ru"})
-        headers = {
-            'X-API-KEY': serper_api_key,
-            'Content-Type': 'application/json'
-        }
-        
-        retries = 3
-        delay = 2
-        for i in range(retries):
-            try:
-                response = requests.post(url, headers=headers, data=payload, timeout=30)
-                response.raise_for_status() # Проверка на ошибки HTTP (4xx, 5xx)
-                
-                results = response.json()
-                
-                if "organic" in results:
-                    # Адаптируем ответ Serper под наш стандартный формат
-                    formatted_results = {
-                        "items": [{"title": item.get("title"), "link": item.get("link"), "snippet": item.get("snippet")}
-                                  for item in results["organic"][:num_results]]
-                    }
-                    print(f"    <- [Поиск Serper] Ответ получен и обработан.")
-                    return formatted_results
-                else:
-                    print(f"   [Поиск Serper] Запрос выполнен, но органические результаты не найдены.")
-                    break # Прерываем попытки, переходим к резервному API
-
-            except requests.exceptions.HTTPError as e:
-                # Особая обработка ошибки "Too Many Requests"
-                if e.response.status_code == 429:
-                    print(f"   [Поиск Serper] !!! Внимание: Получен статус 429. Попытка {i+1}/{retries}. Жду {delay} сек...")
-                    time.sleep(delay)
-                    delay *= 2
-                    continue
-                else:
-                    print(f"!!! СЕТЕВАЯ ОШИБКА HTTP (Serper): {e}")
-                    break # Прерываем попытки при других ошибках
-            
-            except Exception as e:
-                print(f"   [Поиск Serper] !!! ОШИБКА: {e}. Попытка {i+1}/{retries}. Жду {delay} сек...")
-                time.sleep(delay)
-                delay *= 2
-        
-        print(f"!!! [SearchAgent] Основной API (Serper) не справился после {retries} попыток.")
-
-    # --- Попытка №2: Резервный API (Google Custom Search) ---
-    # Этот блок остается без изменений
-    google_api_key = os.getenv("GOOGLE_SEARCH_API_KEY")
-    google_cx_id = os.getenv("SEARCH_ENGINE_ID")
-    if google_api_key and google_cx_id:
-        print(f"!!! [SearchAgent] Переключаюсь на резервный API (Google)...")
-        # google_search_legacy выбросит SearchAPIFailureError в случае провала
-        return google_search_legacy(query, google_api_key, google_cx_id, num_results)
-
-    # Если мы дошли до сюда, значит, оба API провалились.
-    print("!!! КРИТИЧЕСКАЯ ОШИБКА ПОИСКА: Все API недоступны или не справились.")
-    raise SearchAPIFailureError(f"Все поисковые API провалились для запроса: '{query}'")
-
-def google_search_legacy(query: str, api_key: str, cx_id: str, num_results: int) -> dict:
-    """Резервная функция поиска через Google API с механизмом повторных попыток."""
-    url = "https://www.googleapis.com/customsearch/v1"
-    params = {'key': api_key, 'cx': cx_id, 'q': query, 'num': num_results}
-    retries = 3
-    delay = 2
-    
-    print(f"    -> [Поиск Google] Выполняю запрос: '{query}'...")
-    for i in range(retries):
-        try:
-            response = requests.get(url, params=params, timeout=20)
-            response.raise_for_status()
-            print(f"    <- [Поиск Google] Ответ получен.")
-            return response.json()
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 429:
-                print(f"   [Поиск Google] !!! Внимание: Получен статус 429 (Too Many Requests). Попытка {i+1}/{retries}. Жду {delay} сек...")
-                time.sleep(delay)
-                delay *= 2
-                continue
-            else:
-                print(f"!!! СЕТЕВАЯ ОШИБКА HTTP (Google): {e}")
-                return {"error": str(e)}
-        except Exception as e:
-            print(f"!!! СЕТЕВАЯ ОШИБКА (Google): {e}")
-            time.sleep(delay)
-            delay *= 2
-            continue
-            
-    # --- ИЗМЕНЕНИЕ: ВМЕСТО ВОЗВРАТА СЛОВАРЯ, ВЫБРАСЫВАЕМ ИСКЛЮЧЕНИЕ ---
-    print(f"!!! КРИТИЧЕСКАЯ ОШИБКА ПОИСКА (Google): Все {retries} попытки провалились.")
-    raise SearchAPIFailureError(f"Резервный API (Google) не справился после {retries} попыток.")
-
-def google_search(query: str, api_key: str, cx_id: str, num_results: int = 10) -> dict:
-    """
-    Выполняет поиск через Google Custom Search API с механизмом повторных попыток.
-    Возвращает сырой JSON ответа или словарь с ключом 'error'.
-    """
-    if not api_key or not cx_id:
-        print("!!! ОШИБКА: Ключи для Google Search не предоставлены в .env")
-        return {"error": "API-ключи не предоставлены."}
-    
-    url = "https://www.googleapis.com/customsearch/v1"
-    params = {'key': api_key, 'cx': cx_id, 'q': query, 'num': num_results}
-    
-    retries = 3
-    delay = 2 # Начальная задержка в секундах
-    
-    print(f"    -> [Поиск] Выполняю запрос: '{query}'...")
-    for i in range(retries):
-        try:
-            response = requests.get(url, params=params, timeout=20)
-            response.raise_for_status() # Проверка на ошибки HTTP (4xx, 5xx)
-            print(f"    <- [Поиск] Ответ получен.")
-            return response.json()
-        
-        except requests.exceptions.HTTPError as e:
-            # Особая обработка ошибки "Too Many Requests"
-            if e.response.status_code == 429:
-                print(f"   [Поиск] !!! Внимание: Получен статус 429 (Too Many Requests). Попытка {i+1}/{retries}. Жду {delay} сек...")
-                time.sleep(delay)
-                delay *= 2 # Увеличиваем задержку для следующей попытки
-                continue
-            else:
-                print(f"!!! СЕТЕВАЯ ОШИБКА HTTP: {e}")
-                return {"error": str(e)}
-        
-        except requests.exceptions.Timeout:
-            print(f"!!! СЕТЕВАЯ ОШИБКА: Таймаут (20с) при поиске по запросу '{query}'. Попытка {i+1}/{retries}.")
-            time.sleep(delay)
-            delay *= 2
-            continue
-            
-        except requests.exceptions.RequestException as e:
-            print(f"!!! СЕТЕВАЯ ОШИБКА: {e}")
-            return {"error": str(e)}
-
-    print(f"!!! КРИТИЧЕСКАЯ ОШИБКА ПОИСКА: Все {retries} попытки для запроса '{query}' провалились.")
-    return {"error": f"Все {retries} попытки провалились."}
-
-
-def robust_json_parser(text: str) -> any:
-    """
-    Улучшенная версия парсера. Ищет JSON более агрессивно.
-    """
-    if not isinstance(text, str):
-        print("!!! ОШИБКА ПАРСИНГА: Входные данные не являются строкой.")
-        return None
-
-    # 1. Попытка найти JSON в markdown-блоке
-    match = re.search(r'```json\s*([\s\S]*?)\s*```', text, re.DOTALL)
-    if match:
-        json_str = match.group(1).strip()
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            print("!!! ОШИБКА ПАРСИНГА: Найден markdown-блок, но внутри невалидный JSON.")
-            # Продолжаем, чтобы попробовать другие методы
-
-    # 2. Попытка найти первый '{' или '[' и последний '}' или ']'
-    start = -1
-    end = -1
-    
-    start_curly = text.find('{')
-    end_curly = text.rfind('}')
-    start_square = text.find('[')
-    end_square = text.rfind(']')
-
-    if start_curly != -1 and end_curly != -1:
-        start, end = start_curly, end_curly + 1
-    elif start_square != -1 and end_square != -1:
-        start, end = start_square, end_square + 1
-    
-    if start != -1:
-        json_str = text[start:end]
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            print(f"!!! ОШИБКА ПАРСИНГА: Не удалось распарсить фрагмент.")
-            # Продолжаем, чтобы попробовать последнюю попытку
-
-    # 3. Последняя попытка: просто пытаемся распарсить весь текст
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        print(f"!!! КРИТИЧЕСКАЯ ОШИБКА ПАРСИНГА: Не удалось извлечь валидный JSON из ответа.")
-        return None
-
-def sanitize_filename(text: str) -> str:
-    """Очищает текст для создания безопасного имени файла с транслитерацией."""
-    text = text.lower()
-    translit_map = {
-        'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'yo',
-        'ж':'zh','з':'z','и':'i','й':'y','к':'k','л':'l','м':'m','н':'n',
-        'о':'o','п':'p','р':'r','с':'s','т':'t','у':'u','ф':'f','х':'h',
-        'ц':'ts','ч':'ch','ш':'sh','щ':'sch','ъ':'','ы':'y','ь':'','э':'e',
-        'ю':'yu','я':'ya'
-    }
-    for cyr, lat in translit_map.items():
-        text = text.replace(cyr, lat)
-    
-    text = re.sub(r'[^a-z0-9\s-]', '', text)
-    text = re.sub(r'[\s-]+', '_', text).strip('_')
-    return text[:70]
-
+from typing import Type, Dict
+from pydantic import BaseModel, ValidationError
+from langchain.output_parsers import PydanticOutputParser
+from core.llm_client import LLMClient
+from core.budget_manager import APIBudgetManager
 
 def format_search_results_for_llm(search_results: dict) -> str:
-    """
-    Форматирует сырой JSON от Google Search и Serper в удобную для LLM строку.
-    """
-    # Serper использует ключ 'organic', Google - 'items'
+    """Форматирует сырой JSON от поисковика в удобную для LLM строку."""
     items = search_results.get("organic", search_results.get("items", []))
-    
-    if "error" in search_results or not items:
-        return "Поиск не дал результатов или произошла ошибка."
+    if not items:
+        return "Поиск не дал результатов."
     
     snippets = []
     for i, item in enumerate(items):
@@ -260,182 +22,25 @@ def format_search_results_for_llm(search_results: dict) -> str:
                    f"Заголовок: {item.get('title', 'N/A')}\n"
                    f"Фрагмент: {item.get('snippet', 'N/A')}\n")
         snippets.append(snippet)
-    
     return "\n".join(snippets)
 
-def invoke_llm_for_json_with_retry(
-    main_llm: ChatGoogleGenerativeAI,
-    sanitizer_llm: ChatGoogleGenerativeAI,
-    prompt: str,
-    pydantic_schema: BaseModel,
-    budget_manager: APIBudgetManager,
-    max_retries: int = 3
-) -> dict:
-    """
-    Выполняет вызов LLM для получения JSON с многоуровневой стратегией повторных попыток.
-    Принцип Нулевого Доверия: мы не верим, что LLM вернет валидный JSON с первого раза.
-    """
-    parser = PydanticOutputParser(pydantic_object=pydantic_schema)
-    prompt_with_instructions = f"{prompt}\n\n{parser.get_format_instructions()}"
-    
-    last_error = None
-    raw_output = ""
-    # --- НОВАЯ ПЕРЕМЕННАЯ ДЛЯ УМНОЙ ОБРАТНОЙ СВЯЗИ ---
-    detailed_feedback = ""
-
-    for attempt in range(max_retries):
-        print(f"      [JSON Invoker] Попытка {attempt + 1}/{max_retries}...")
-        
-        current_prompt = prompt_with_instructions
-        current_llm = main_llm
-
-        # --- ШАГ 4: Внедряем "умную" обратную связь в промпт ---
-        if attempt > 0:
-            # Стратегия 2: Просим основную модель исправить свой же вывод с детальной обратной связью
-            if attempt == 1:
-                print("      [JSON Invoker] Стратегия 2: Прошу основную модель исправить свой невалидный JSON с детальной обратной связью.")
-                current_prompt = f"""Твой предыдущий ответ не удалось распарсить. Обнаружены следующие КОНКРЕТНЫЕ ошибки валидации:
----
-{detailed_feedback}
----
-Вот твой предыдущий, невалидный ответ целиком:
----
-{raw_output}
----
-Пожалуйста, внимательно изучи ошибки, исправь свой JSON и верни ТОЛЬКО валидный JSON, который соответствует оригинальной схеме.
-Оригинальные инструкции по формату:
-{parser.get_format_instructions()}
-"""
-            # Стратегия 3: Используем "санитарную" модель для извлечения JSON
-            elif attempt == 2:
-                print("      [JSON Invoker] Стратегия 3: Использую 'санитарную' модель для извлечения JSON из вывода.")
-                current_llm = sanitizer_llm
-                current_prompt = f"""Извлеки валидный JSON объект из текста ниже. Верни ТОЛЬКО сам JSON и ничего больше.
-
-ТЕКСТ ДЛЯ АНАЛИЗА:
----
-{raw_output}
----
-
-Вот оригинальные инструкции по формату, которым должен соответствовать JSON:
-{parser.get_format_instructions()}
-"""
-        
-        model_name = current_llm.model
-        if not budget_manager.can_i_spend(model_name):
-            print(f"!!! [Бюджет] ДНЕВНОЙ ЛИМИТ для {model_name} исчерпан. Попытка отменена.")
-            last_error = ResourceExhausted(f"Daily budget limit for {model_name} reached.")
-            continue
-
-        try:
-            response = current_llm.invoke(current_prompt)
-            raw_output = response.content
-            budget_manager.record_spend(model_name)
-            parsed_object = parser.parse(raw_output)
-            print("      [JSON Invoker] <- Ответ LLM успешно получен и распарсен.")
-            return parsed_object.model_dump()
-        
-        # --- ШАГ 2: Перехватываем КОНКРЕТНУЮ ошибку валидации ---
-        except ValidationError as e:
-            last_error = e
-            # --- ШАГ 3: Формируем детальную обратную связь ---
-            error_messages = [f"- Поле `{' -> '.join(map(str, err['loc']))}`: {err['msg']}" for err in e.errors()]
-            detailed_feedback = "\n".join(error_messages)
-            print(f"      [JSON Invoker] !!! Ошибка валидации Pydantic. Детали:\n{detailed_feedback}")
-            if isinstance(e, ResourceExhausted):
-                 budget_manager.record_spend(model_name)
-            time.sleep(3)
-
-        except Exception as e:
-            last_error = e
-            detailed_feedback = f"Произошла общая ошибка: {str(e)}" # Для других типов ошибок
-            print(f"      [JSON Invoker] !!! Ошибка на попытке {attempt + 1}: {e}")
-            if isinstance(e, ResourceExhausted):
-                 budget_manager.record_spend(model_name)
-            time.sleep(3)
-
-    print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось получить валидный JSON после {max_retries} попыток.")
-    if isinstance(last_error, ResourceExhausted):
-        raise last_error
-    return {}
-
-def read_system_logs(log_dir: str, last_n_files: int = 5) -> str:
-    """Читает последние N файлов логов из директории и возвращает их содержимое."""
-    try:
-        log_files = sorted(
-            [os.path.join(log_dir, f) for f in os.listdir(log_dir) if f.endswith('.json')],
-            key=os.path.getmtime,
-            reverse=True
-        )
-        
-        content = []
-        for log_file in log_files[:last_n_files]:
-            with open(log_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                content.append(f"--- LOG FILE: {os.path.basename(log_file)} ---\n{json.dumps(data, ensure_ascii=False, indent=2)}\n")
-        
-        return "\n".join(content) if content else "Логи не найдены."
-    except Exception as e:
-        return f"Ошибка при чтении логов: {e}"
-    
-def validate_artifact_citations(artifact_content: str, knowledge_base: dict) -> dict:
-    """
-    Проверяет, что все цитаты [Утверждение: id] в тексте существуют в Базе Знаний.
-    Это детерминированный, не-AI аудитор.
-    """
-    print("      [Citation Auditor] -> Провожу аудит цитат в сгенерированном артефакте...")
-    
-    # Находим все уникальные ID, на которые ссылается артефакт
-    found_citations = set(re.findall(r'\[Утверждение: ([\w_,-]+)\]', artifact_content))
-    
-    if not found_citations:
-        reason = "Критический провал: Артефакт не содержит ни одной цитаты [Утверждение: id], что делает его недоказуемым."
-        print(f"      [Citation Auditor] <- !!! {reason}")
-        return {"is_valid": False, "reason": reason}
-
-    invalid_citations = []
-    for citation_id in found_citations:
-        if citation_id not in knowledge_base:
-            invalid_citations.append(citation_id)
-
-    if invalid_citations:
-        reason = f"Найдены ссылки на несуществующие или устаревшие факты: {', '.join(invalid_citations)}"
-        print(f"      [Citation Auditor] <- !!! {reason}")
-        return {
-            "is_valid": False,
-            "reason": reason
-        }
-    
-    print(f"      [Citation Auditor] <- Аудит успешен. Все {len(found_citations)} цитат корректны.")
-    return {"is_valid": True, "reason": "Все цитаты корректны."}
-
 def citation_post_processor(markdown_text: str, knowledge_base: dict) -> str:
-    """
-    Находит маркеры [CITE:claim_id], заменяет их на сноски и генерирует
-    список источников в конце документа. Это детерминированная функция.
-    """
+    """Находит маркеры [CITE:claim_id], заменяет их на сноски и генерирует список источников."""
     print("   [PostProcessor] -> Обрабатываю цитаты в финальном отчете...")
-    
-    # Находим все уникальные ID в порядке их появления
     found_ids = re.findall(r'\[CITE:([\w_,-]+)\]', markdown_text)
     unique_ids_in_order = list(OrderedDict.fromkeys(found_ids))
     
     if not unique_ids_in_order:
-        print("   [PostProcessor] <- Цитаты не найдены. Возвращаю текст без изменений.")
         return markdown_text
 
-    # Создаем карту ID -> номер сноски
     citation_map = {claim_id: i + 1 for i, claim_id in enumerate(unique_ids_in_order)}
 
-    # Заменяем маркеры на сноски
     def replace_marker(match):
         claim_id = match.group(1)
-        citation_number = citation_map.get(claim_id)
-        return f"[^{citation_number}]" if citation_number else "[ЦИТАТА НЕ НАЙДЕНА]"
+        return f"[^{citation_map.get(claim_id, '??')}]"
 
     processed_text = re.sub(r'\[CITE:([\w_,-]+)\]', replace_marker, markdown_text)
 
-    # Генерируем список источников
     references_list = ["\n\n---\n\n## Список Источников\n"]
     for claim_id, number in citation_map.items():
         claim_data = knowledge_base.get(claim_id)
@@ -443,9 +48,67 @@ def citation_post_processor(markdown_text: str, knowledge_base: dict) -> str:
             source_link = claim_data.get('source_link', '#')
             statement = claim_data.get('statement', 'Утверждение не найдено.')
             references_list.append(f"[^{number}]: {statement} ([Источник]({source_link}))")
-        else:
-            references_list.append(f"[^{number}]: Ошибка: Утверждение с ID '{claim_id}' не найдено в Базе Знаний.")
     
-    final_text = processed_text + "\n".join(references_list)
-    print(f"   [PostProcessor] <- Обработка завершена. Добавлено {len(unique_ids_in_order)} сносок.")
-    return final_text
+    return processed_text + "\n".join(references_list)
+
+def invoke_llm_for_json_with_retry(
+    llm_client: LLMClient,
+    model_name: str,
+    sanitizer_model_name: str,
+    prompt: str,
+    pydantic_schema: Type[BaseModel],
+    budget_manager: APIBudgetManager,
+    max_retries: int = 3
+) -> Dict:
+    """
+    Выполняет вызов LLM для получения JSON с многоуровневой стратегией самокоррекции.
+    """
+    parser = PydanticOutputParser(pydantic_object=pydantic_schema)
+    prompt_with_instructions = f"{prompt}\n\n{parser.get_format_instructions()}"
+    
+    raw_output = ""
+    for attempt in range(max_retries):
+        print(f"      [JSON Invoker] Попытка {attempt + 1}/{max_retries}...")
+        
+        current_prompt = prompt_with_instructions
+        current_model = model_name
+
+        if attempt == 1: # Вторая попытка: просим ту же модель исправить себя
+            print("      [JSON Invoker] Стратегия 2: Самокоррекция.")
+            current_prompt = f"""Твой предыдущий ответ не удалось распарсить.
+Вот твой невалидный ответ:
+---
+{raw_output}
+---
+Пожалуйста, исправь свой JSON и верни ТОЛЬКО валидный JSON, который соответствует оригинальной схеме.
+Оригинальные инструкции по формату:
+{parser.get_format_instructions()}
+"""
+        elif attempt == 2: # Третья попытка: эскалация на "санитарную" модель
+            print(f"      [JSON Invoker] Стратегия 3: Эскалация на санитарную модель '{sanitizer_model_name}'.")
+            current_model = sanitizer_model_name
+            current_prompt = f"""Извлеки валидный JSON объект из текста ниже. Верни ТОЛЬКО сам JSON и ничего больше.
+ТЕКСТ ДЛЯ АНАЛИЗА:
+---
+{raw_output}
+---
+Вот оригинальные инструкции по формату, которым должен соответствовать JSON:
+{parser.get_format_instructions()}
+"""
+        try:
+            response = llm_client.invoke(current_model, current_prompt)
+            raw_output = response.content
+            parsed_object = parser.parse(raw_output)
+            print("      [JSON Invoker] <- Ответ LLM успешно получен и распарсен.")
+            return parsed_object.model_dump()
+        
+        except (ValidationError, json.JSONDecodeError) as e:
+            print(f"      [JSON Invoker] !!! Ошибка валидации/парсинга на попытке {attempt + 1}: {e}")
+            time.sleep(2)
+        except Exception as e:
+            print(f"      [JSON Invoker] !!! Критическая ошибка API на попытке {attempt + 1}: {e}")
+            # При ошибках API (например, лимиты) нет смысла продолжать
+            return {}
+
+    print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось получить валидный JSON после {max_retries} попыток.")
+    return {}

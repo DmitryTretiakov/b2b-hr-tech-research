@@ -1,100 +1,47 @@
 # agents/supervisor.py
-import json
-import uuid
-from langchain_google_genai import ChatGoogleGenerativeAI
-from core.budget_manager import APIBudgetManager
+from agents.base_agent import BaseAgent
 from utils.helpers import invoke_llm_for_json_with_retry
-from agents.models import StrategicPlan, AnalystReport, Task # Импортируем модели
+from pydantic import BaseModel, Field
+from typing import List, Dict
 
-class SupervisorAgent:
+class GraphPlan(BaseModel):
+    """Pydantic-модель для описания плана графа."""
+    tasks: List[Dict] = Field(description="Список всех задач, которые нужно выполнить.")
+    initial_model_assignments: Dict[str, str] = Field(description="Словарь {task_id: model_name} с начальным распределением моделей.")
+    # Примечание: ребра (edges) будут управляться логикой оркестратора
+
+class SupervisorAgent(BaseAgent):
     """
-    "Мозговой центр" системы. Отвечает только за планирование и стратегию.
-    Использует самую мощную модель (Gemini 2.5 Pro).
+    Генерирует первоначальный план для графа, соблюдая иерархию ресурсов.
+    Использует модель Уровня 4 (Pro).
     """
-    def __init__(self, llm: ChatGoogleGenerativeAI, sanitizer_llm: ChatGoogleGenerativeAI, budget_manager: APIBudgetManager):
-        self.llm = llm
-        self.sanitizer_llm = sanitizer_llm
-        self.budget_manager = budget_manager
-        print("-> SupervisorAgent (на базе Gemini 2.5 Pro) готов к работе.")
+    def create_initial_plan(self, main_goal: str) -> Dict:
+        model_name = "gemini-2.5-pro"
+        prompt = f"""
+**ТВОЯ РОЛЬ:** Ты - Главный Архитектор AI-систем. Твоя задача - создать первоначальный, ресурсоэффективный план исследования в виде графа задач.
 
-    def create_strategic_plan(self, world_model_context: dict) -> dict:
-        """
-        Генерирует первоначальный план, создавая состязательные пары задач.
-        """
-        print("   [Supervisor] Создаю первоначальный стратегический план с состязательными задачами...")
+**ГЛАВНАЯ ЦЕЛЬ ИССЛЕДОВАНИЯ:**
+{main_goal}
 
-        prompt = f"""**ОБЩИЙ КОНТЕКСТ ПРОЕКТА:**
----
-{json.dumps(world_model_context['static_context'], ensure_ascii=False, indent=2)}
----
-**ТВОЯ РОЛЬ:** Ты - Главный Продуктовый Стратег. Твоя задача - создать комплексный, пошаговый план исследования.
-**КЛЮЧЕВОЙ ПРИНЦИП (СОСТЯЗАТЕЛЬНОСТЬ):** Для каждой исследовательской цели ты ОБЯЗАН создать ДВЕ задачи:
-1.  **ResearcherAgent:** Ищет подтверждения, позитивные данные, рыночные успехи.
-2.  **ContrarianAgent:** Агрессивно ищет опровержения, критику, провалы, риски.
+**ФИЛОСОФИЯ РАСПРЕДЕЛЕНИЯ РЕСУРСОВ (СТРОГО СОБЛЮДАТЬ):**
+- **Уровень 2 (Gemma 3 / Flash-Lite):** Для 90% рутинных задач (Researcher, QualityAssessor, Fixer, ReportWriter).
+- **Уровень 3 (Flash):** Для сложных аналитических задач (Analyst, KnowledgeJanitor).
+- **Уровень 4 (Pro):** Не назначать. Этот уровень зарезервирован для тебя и мета-агентов.
 
 **ТВОЯ ЗАДАЧА:**
-Проанализируй "ВХОДНОЙ БРИФ". Сгенерируй план из 3-4 логических фаз. Для каждой фазы создай 2-3 **пары** состязательных задач.
-Для каждой пары задач используй одинаковый `pair_id`.
-
-**ПРИМЕР ПАРЫ ЗАДАЧ:**
-- "task_id": "task_001_research", "assignee": "ResearcherAgent", "description": "Найти 3-5 успешных конкурентов...", "pair_id": "pair_001"
-- "task_id": "task_001_contra", "assignee": "ContrarianAgent", "description": "Найти 3-5 провалившихся конкурентов...", "pair_id": "pair_001"
-
-Ты ОБЯЗАН вернуть результат в формате JSON.
+1. Декомпозируй главную цель на логические этапы (например, "Анализ конкурентов", "Оценка рынка", "Техническая экспертиза").
+2. Для каждого этапа создай набор задач. Обязательно включай состязательные пары (`Researcher` и `Contrarian`).
+3. Для КАЖДОЙ задачи в поле `initial_model_assignments` назначь **самую дешевую подходящую модель** из Уровня 2 (например, 'gemma-3').
+4. Верни результат в виде ОДНОГО JSON-объекта, соответствующего схеме `GraphPlan`.
 """
-        plan = invoke_llm_for_json_with_retry(
-            main_llm=self.llm,
-            sanitizer_llm=self.sanitizer_llm,
+        print("   [SupervisorAgent] -> Генерирую ресурсоэффективный план графа...")
+        plan_data = invoke_llm_for_json_with_retry(
+            main_llm=self.llm_client._get_model_instance(model_name),
+            sanitizer_llm=self.llm_client._get_model_instance("gemini-2.5-flash"), # Санитайзер уровнем ниже
             prompt=prompt,
-            pydantic_schema=StrategicPlan,
-            budget_manager=self.budget_manager
+            pydantic_schema=GraphPlan,
+            budget_manager=self.budget_manager,
+            model_name_for_budget=model_name
         )
-
-        if plan and "phases" in plan:
-            print("   [Supervisor] Первоначальный состязательный план успешно сгенерирован.")
-            return plan
-        else:
-            print("!!! Supervisor: Не удалось сгенерировать план.")
-            return {"main_goal_status": "FAILED", "phases": []}
-
-    def reflect_and_update_plan(self, analyst_report: dict, current_plan: dict) -> dict:
-        """
-        Проводит рефлексию на основе концентрированного отчета от Аналитика.
-        """
-        print("   [Supervisor] Провожу рефлексию на основе отчета Аналитика...")
-
-        prompt = f"""**ТВОЯ РОЛЬ:** Ассистент-планировщик.
-**ТВОЯ ЗАДАЧА:** Тебе предоставлен отчет от старшего аналитика и текущий план. Твоя задача - обновить план в соответствии с выводами.
-
-**СТРУКТУРИРОВАННЫЙ ОТЧЕТ АНАЛИТИКА:**
----
-{json.dumps(analyst_report, ensure_ascii=False, indent=2)}
----
-
-**ТЕКУЩИЙ ПЛАН:**
----
-{json.dumps(current_plan, ensure_ascii=False, indent=2)}
----
-
-**ИНСТРУКЦИИ ПО ОБНОВЛЕНИЮ:**
-1.  Заверши текущую активную фазу (статус "COMPLETED").
-2.  Активируй следующую фазу (статус "IN_PROGRESS").
-3.  Если аналитик обнаружил пробелы в данных (`data_gaps`), создай новые **пары состязательных задач** (для ResearcherAgent и ContrarianAgent) и добавь их в новую активную фазу.
-4.  Если пробелов нет и все цели достигнуты, измени `main_goal_status` на `READY_FOR_FINAL_BRIEF`.
-5.  Верни **полностью обновленный объект стратегического плана**.
-
-Ты ОБЯЗАН вернуть результат в формате JSON.
-"""
-        updated_plan = invoke_llm_for_json_with_retry(
-            main_llm=self.llm,
-            sanitizer_llm=self.sanitizer_llm,
-            prompt=prompt,
-            pydantic_schema=StrategicPlan,
-            budget_manager=self.budget_manager
-        )
-        if updated_plan and "phases" in updated_plan:
-            print("   [Supervisor] Рефлексия завершена. План обновлен.")
-            return updated_plan
-        else:
-            print("!!! Supervisor: Не удалось сгенерировать обновленный план.")
-            return current_plan
+        print("   [SupervisorAgent] <- План графа успешно сгенерирован.")
+        return plan_data

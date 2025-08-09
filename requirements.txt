@@ -4,3 +4,4 @@ langchain-google-genai
 pydantic
 langchain
 faiss-cpu
+langgraph
