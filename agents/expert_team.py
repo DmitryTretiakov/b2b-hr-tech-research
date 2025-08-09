@@ -737,7 +737,7 @@ class ExpertTeam:
             world_model.update_task_status(task['task_id'], 'FAILED')
 
     def _execute_product_task(self, task: dict, world_model: WorldModel):
-        """Генерирует продуктовый бриф, используя Gemma."""
+        """Генерирует продуктовый бриф с циклом исправления ошибок."""
         print(f"   [ProductManagerAgent] -> Приступаю к задаче: {task['description']}")
         
         arbiter_llm = self._get_llm_for_task('AUDIT')
@@ -746,50 +746,69 @@ class ExpertTeam:
         kb = world_model.get_full_context()['dynamic_knowledge']['knowledge_base']
         context_kb = {claim_id: kb[claim_id] for claim_id in relevant_claims if claim_id in kb}
 
-        prompt = f"""**ТВОЯ РОЛЬ:** Опытный Владелец Продукта (Product Owner).
-**ТВОЯ ЗАДАЧА:** "{task['description']}". На основе ВСЕХ имеющихся фактов, создай детальный продуктовый бриф.
+        MAX_RETRIES = 2
+        feedback = "" # Начинаем без обратной связи
 
-**ФАКТЫ ИЗ БАЗЫ ЗНАНИЙ ДЛЯ АНАЛИЗА:**
----
-{json.dumps(context_kb, ensure_ascii=False, indent=2)}
----
+        for attempt in range(MAX_RETRIES):
+            print(f"      [ProductManagerAgent] Попытка генерации артефакта {attempt + 1}/{MAX_RETRIES}...")
+            
+            feedback_section = ""
+            if feedback:
+                feedback_section = f"""
+    **ОБРАТНАЯ СВЯЗЬ ОТ АУДИТОРА:**
+    Твоя предыдущая попытка была отклонена. Причина: "{feedback}".
+    **ТВОЯ ЗАДАЧА:** Перепиши артефакт, полностью устранив указанный недостаток. Убедись, что ВСЕ ключевые утверждения подкреплены цитатами.
+    """
 
-**ИНСТРУКЦИИ:**
-1.  **Напиши детальное описание** продукта "Карьерный Навигатор", его цели и ключевые функции.
-2.  **Сформулируй список User Stories** для MVP в формате "Как <роль>, я хочу <действие>, чтобы <ценность>".
-3.  **Верни результат** в виде ОДНОГО JSON-объекта.
-"""
-        report = None
-        print(f"      [ProductManagerAgent] Генерирую отчет с отказоустойчивым механизмом...")
-        report = invoke_llm_for_json_with_retry(
-            main_llm=arbiter_llm,
-            sanitizer_llm=self.llms['expert_lite'],
-            prompt=prompt,
-            pydantic_schema=ProductBrief,
-            budget_manager=self.budget_manager
-        )
+            prompt = f"""**ТВОЯ РОЛЬ:** Опытный Владелец Продукта (Product Owner).
+    **ТВОЯ ЗАДАЧА:** "{task['description']}". На основе ВСЕХ имеющихся фактов, создай детальный продуктовый бриф.
 
-        # --- Проверка результата ПОСЛЕ цикла ---
-        if report and 'product_description' in report and 'user_stories' in report:
-            # Собираем весь текст для проверки
-            full_content = f"# Описание\n{report['product_description']}\n\n# User Stories\n"
-            full_content += "\n".join(report['user_stories'])
+    **ФАКТЫ ИЗ БАЗЫ ЗНАНИЙ ДЛЯ АНАЛИЗА:**
+    ---
+    {json.dumps(context_kb, ensure_ascii=False, indent=2)}
+    ---
 
-            kb = world_model.get_full_context()['dynamic_knowledge']['knowledge_base']
-            validation_result = validate_artifact_citations(full_content, kb)
+    **КРИТИЧЕСКИ ВАЖНЫЕ ПРАВИЛА ЦИТИРОВАНИЯ:**
+    1.  Ты ОБЯЗАН использовать ТОЛЬКО факты из предоставленной "БАЗЫ ЗНАНИЙ".
+    2.  Каждое утверждение, вывод или требование, основанное на факте, ДОЛЖНО сопровождаться ссылкой на источник в формате `[Утверждение: claim_id]`.
+    3.  **ЕСЛИ ТЫ НЕ БУДЕШЬ ИСПОЛЬЗОВАТЬ ЦИТАТЫ, ТВОЯ РАБОТА БУДЕТ ОТКЛОНЕНА.**
 
-            if validation_result["is_valid"]:
-                filename = "product_brief_mvp.md"
-                content = f"# Описание Продукта: Карьерный Навигатор\n\n{report['product_description']}\n\n## User Stories для MVP\n\n"
-                content += "\n".join([f"- {story}" for story in report['user_stories']])
-                world_model.save_artifact(filename, content)
-                world_model.update_task_status(task['task_id'], 'COMPLETED')
+    **ИНСТРУКЦИИ:**
+    1.  Напиши детальное описание продукта "Карьерный Навигатор", его цели и ключевые функции.
+    2.  Сформулируй список User Stories для MVP в формате "Как <роль>, я хочу <действие>, чтобы <ценность>".
+    3.  Верни результат в виде ОДНОГО JSON-объекта.
+    {feedback_section}
+    """
+            report = invoke_llm_for_json_with_retry(
+                main_llm=arbiter_llm,
+                sanitizer_llm=self.llms['expert_lite'],
+                prompt=prompt,
+                pydantic_schema=ProductBrief,
+                budget_manager=self.budget_manager
+            )
+
+            if report and 'product_description' in report and 'user_stories' in report:
+                full_content = f"# Описание\n{report['product_description']}\n\n# User Stories\n" + "\n".join(report['user_stories'])
+                validation_result = validate_artifact_citations(full_content, kb)
+
+                if validation_result["is_valid"]:
+                    filename = "product_brief_mvp.md"
+                    content = f"# Описание Продукта: Карьерный Навигатор\n\n{report['product_description']}\n\n## User Stories для MVP\n\n" + "\n".join([f"- {story}" for story in report['user_stories']])
+                    world_model.save_artifact(filename, content)
+                    world_model.update_task_status(task['task_id'], 'COMPLETED')
+                    return # Успех, выходим из функции
+                else:
+                    feedback = validation_result['reason']
+                    print(f"   [ProductManagerAgent] !!! Попытка {attempt + 1} не прошла аудит цитат. Причина: {feedback}. Отправляю на доработку...")
+                    time.sleep(5)
             else:
-                print(f"   [ProductManagerAgent] !!! Артефакт не прошел аудит цитат. Причина: {validation_result['reason']}")
-                world_model.update_task_status(task['task_id'], 'FAILED')
-        else:
-            print(f"   [ProductManagerAgent] !!! Не удалось сгенерировать отчет после нескольких попыток.")
-            world_model.update_task_status(task['task_id'], 'FAILED')
+                feedback = "Не удалось сгенерировать JSON требуемой структуры."
+                print(f"   [ProductManagerAgent] !!! Попытка {attempt + 1} провалена: не удалось сгенерировать отчет.")
+                time.sleep(5)
+
+        # Если цикл завершился без успеха
+        print(f"   [ProductManagerAgent] !!! Не удалось сгенерировать валидный артефакт после {MAX_RETRIES} попыток.")
+        world_model.update_task_status(task['task_id'], 'FAILED')
     
     def _get_llm_for_nli(self) -> ChatGoogleGenerativeAI:
         """
