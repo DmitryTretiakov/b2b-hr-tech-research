@@ -34,6 +34,20 @@ def supervisor_node(state: GraphState, supervisor: SupervisorAgent) -> GraphStat
         state['node_outputs'] = {'accumulated_raw_facts': []}
     return state
 
+def task_fetcher_node(state: GraphState) -> GraphState:
+    """
+    Узел, который берет следующую задачу из очереди и помещает ее в 'current_task'.
+    """
+    print("\n--- Узел: Task Fetcher ---")
+    if not state['task_queue']:
+        return state
+    
+    task = state['task_queue'].pop(0)
+    state['current_task'] = task
+    state['error_message'] = None
+    print(f"   [FetcherNode] -> Взял в работу задачу: {task['task_id']} ({task['agent_name']})")
+    return state
+
 def task_executor_node(state: GraphState, agents: dict) -> GraphState:
     """
     Выполняет одну задачу. Для агентов-артефакторов внедряет Базу Знаний в задачу.
