@@ -6,3 +6,5 @@ langchain
 faiss-cpu
 langgraph
 PyYAML
+streamlit
+pandas
