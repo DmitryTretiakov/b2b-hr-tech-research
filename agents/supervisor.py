@@ -1,34 +1,67 @@
 # agents/supervisor.py
+from __future__ import annotations
 from agents.base_agent import BaseAgent
 from utils.helpers import invoke_llm_for_json_with_retry
 from agents.models import GraphPlan
-from typing import List, Dict
+from typing import Dict
+import yaml
+
+if 'ToolRegistry' not in locals():
+    from core.tool_registry import ToolRegistry
+if 'LLMClient' not in locals():
+    from core.llm_client import LLMClient
+if 'APIBudgetManager' not in locals():
+    from core.budget_manager import APIBudgetManager
+
 
 class SupervisorAgent(BaseAgent):
     """
-    Генерирует первоначальный и последующие планы для графа, соблюдая иерархию ресурсов.
+    Генерирует первоначальный и последующие планы для графа на основе богатого контекста.
     Использует модель Уровня 4 (Pro).
     """
-    def create_initial_plan(self, main_goal: str) -> Dict:
+    def __init__(self, llm_client: LLMClient, budget_manager: APIBudgetManager, tool_registry: ToolRegistry = None):
+        super().__init__(llm_client, budget_manager, tool_registry)
+
+    def create_initial_plan(self, user_config: Dict) -> Dict:
+        """
+        Создает первоначальный план, верифицируя гипотезы и исследуя главную цель.
+        """
         model_name = "gemini-2.5-pro"
+        
+        # Форматируем конфиг для чистой вставки в промпт
+        config_str = yaml.dump(user_config, allow_unicode=True, sort_keys=False)
+
         prompt = f"""
-**ТВОЯ РОЛЬ:** Ты - Главный Архитектор AI-систем. Твоя задача - создать первоначальный, ресурсоэффективный план исследования в виде графа задач.
+**ТВОЯ РОЛЬ:** Ты - Ведущий Стратегический Аналитик и AI Product Owner. Твоя задача - создать исчерпывающий, но ресурсоэффективный план исследования на основе предоставленного брифа.
 
-**ГЛАВНАЯ ЦЕЛЬ ИССЛЕДОВАНИЯ:**
-{main_goal}
+**ПОЛНЫЙ КОНТЕКСТ ПРОЕКТА (BRIEF):**
+```yaml
+{config_str}
+```
 
-**ФИЛОСОФИЯ РАСПРЕДЕЛЕНИЯ РЕСУРСОВ (СТРОГО СОБЛЮДАТЬ):**
-- **Уровень 2 (gemma-3 / gemini-2.5-flash-lite):** Для 90% рутинных задач (Researcher, Contrarian, QualityAssessor, Fixer, ReportWriter).
-- **Уровень 3 (gemini-2.5-flash):** Для сложных аналитических задач (Analyst, KnowledgeJanitor).
-- **Уровень 4 (gemini-2.5-pro):** Не назначать. Этот уровень зарезервирован для тебя и мета-агентов.
+**ТВОЯ ДВУЕДИНАЯ ЗАДАЧА:**
 
-**ТВОЯ ЗАДАЧА:**
-1. Декомпозируй главную цель на логические этапы (например, "Анализ конкурентов", "Оценка рынка", "Техническая экспертиза").
-2. Для каждого этапа создай набор задач. Обязательно включай состязательные пары (`Researcher` и `Contrarian`).
-3. Для КАЖДОЙ задачи в поле `initial_model_assignments` назначь **самую дешевую подходящую модель** из Уровня 2 (например, 'gemma-3').
-4. Верни результат в виде ОДНОГО JSON-объекта, соответствующего схеме `GraphPlan`.
+**1. ВЕРИФИКАЦИЯ ГИПОТЕЗ (Принцип "Не Доверяй, а Проверяй"):**
+   - Проанализируй раздел `initial_hypotheses`. Каждое утверждение в нем - это гипотеза, а не факт.
+   - Для **каждой ключевой гипотезы** создай состязательную пару задач:
+     - Одна для `ResearcherAgent` (найти подтверждения).
+     - Одна для `ContrarianAgent` (найти опровержения, альтернативные мнения, риски).
+   - **Пример:** Для гипотезы "UI/UX LMS IDO устарел", создай задачи "Найти обзоры и отзывы, подтверждающие устарелость интерфейса Moodle/IDO" и "Найти примеры успешного использования Moodle в корпоративном секторе, опровергающие тезис об устарелости".
+
+**2. СТРАТЕГИЧЕСКОЕ ИССЛЕДОВАНИЕ (Движение к Цели):**
+   - Проанализируй `user_context.main_goal` и `project_context.product_vision`. Особое внимание удели **экономическому обоснованию, созданию дорожной карты и финансовой модели**.
+   - Создай набор исследовательских задач для достижения этой цели. Включи задачи на поиск данных для **расчета CAPEX/OPEX, анализа бизнес-моделей конкурентов и составления Product Roadmap**.
+   - Используй `additional_tasks` как прямое руководство к действию.
+
+**ПРАВИЛА ФОРМИРОВАНИЯ ПЛАНА:**
+- **Декомпозиция:** Разбивай сложные цели на простые, атомарные задачи.
+- **ID Задач:** Используй префиксы `verify_` для задач верификации и `research_` для исследовательских задач. Например: `verify_01_researcher`, `research_01_contrarian`.
+- **Ресурсоэффективность:** Для **ВСЕХ** задач в `initial_model_assignments` назначь самую дешевую подходящую модель: `'gemma-3'`. Эскалация будет происходить автоматически.
+
+**ФОРМАТ ВЫВОДА:**
+Верни результат в виде ОДНОГО JSON-объекта, соответствующего схеме `GraphPlan`.
 """
-        print("   [SupervisorAgent] -> Генерирую ресурсоэффективный план графа...")
+        print("   [SupervisorAgent] -> Генерирую контекстно-осознанный план графа...")
         plan_data = invoke_llm_for_json_with_retry(
             llm_client=self.llm_client,
             model_name=model_name,
@@ -49,10 +82,6 @@ class SupervisorAgent(BaseAgent):
 **СВОДКА ПРЕДЫДУЩЕЙ ФАЗЫ (от AnalystAgent):**
 - **Ключевые Выводы:** {analysis_summary.get('key_insights', 'Нет данных')}
 - **Обнаруженные Пробелы в Данных:** {analysis_summary.get('data_gaps', 'Нет данных')}
-
-**ФИЛОСОФИЯ РАСПРЕДЕЛЕНИЯ РЕСУРСОВ (СТРОГО СОБЛЮДАТЬ):**
-- **Уровень 2 (gemma-3 / gemini-2.5-flash-lite):** Для 90% рутинных задач.
-- **Уровень 3 (gemini-2.5-flash):** Для сложных аналитических задач.
 
 **ТВОЯ ЗАДАЧА:**
 1.  Проанализируй выводы и, что более важно, **пробелы в данных**.

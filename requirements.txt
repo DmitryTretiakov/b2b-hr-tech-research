@@ -5,3 +5,4 @@ pydantic
 langchain
 faiss-cpu
 langgraph
+PyYAML

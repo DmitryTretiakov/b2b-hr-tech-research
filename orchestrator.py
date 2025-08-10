@@ -20,42 +20,24 @@ MODEL_ESCALATION_PATH = {
 # === 1. ОПРЕДЕЛЕНИЕ УЗЛОВ ГРАФА (NODES) =============================================
 # ====================================================================================
 
-# ... (все узлы остаются без изменений) ...
 def supervisor_node(state: GraphState, supervisor: SupervisorAgent) -> GraphState:
-    """Узел для генерации первоначального плана, если его еще нет."""
     print("\n--- Узел: Supervisor ---")
     if not state.get('task_queue') and not state.get('completed_tasks'):
-        print("   [SupervisorNode] Генерирую первоначальный план...")
-        plan = supervisor.create_initial_plan("Подготовить бизнес-кейс для HR-Tech продукта")
+        print("   [SupervisorNode] Генерирую первоначальный план на основе user_config...")
+        plan = supervisor.create_initial_plan(state['user_config'])
         state['task_queue'].extend(plan.get('tasks', []))
         state['model_assignments'].update(plan.get('initial_model_assignments', {}))
         state['node_outputs'] = {'accumulated_raw_facts': []}
-    else:
-        print("   [SupervisorNode] План уже существует, пропускаю генерацию.")
-    return state
-
-def task_fetcher_node(state: GraphState) -> GraphState:
-    """Узел, который берет следующую задачу из очереди и помещает ее в 'current_task'."""
-    print("\n--- Узел: Task Fetcher ---")
-    if not state['task_queue']:
-        return state
-    
-    task = state['task_queue'].pop(0)
-    state['current_task'] = task
-    state['error_message'] = None
-    print(f"   [FetcherNode] -> Взял в работу задачу: {task['task_id']} ({task['agent_name']})")
     return state
 
 def task_executor_node(state: GraphState, agents: dict) -> GraphState:
-    """Узел, который выполняет ОДНУ текущую задачу ('current_task')."""
     print("\n--- Узел: Task Executor ---")
     task = state.get('current_task')
-    if not task:
-        return state
-
+    if not task: return state
     agent_name = task['agent_name']
     agent = agents.get(agent_name)
     model = state['model_assignments'].get(task['task_id'])
+    user_config = state.get('user_config', {}) # <-- Получаем контекст
 
     if not agent or not model:
         task['status'] = 'FAILURE'
@@ -63,152 +45,108 @@ def task_executor_node(state: GraphState, agents: dict) -> GraphState:
         state['completed_tasks'].append(task)
         state['current_task'] = None
         return state
-
     try:
-        print(f"   [ExecutorNode] Запускаю агент '{agent_name}' с моделью '{model}'...")
-        result = agent.execute(task, model)
+        # Передаем контекст в метод execute
+        result = agent.execute(task, model, user_config)
         task['status'] = 'SUCCESS'
-        
         if agent_name in ["Researcher", "Contrarian"]:
             state['node_outputs']['accumulated_raw_facts'].extend(result)
-            print(f"   [ExecutorNode] <- Успех. Добавлено {len(result)} сырых фактов.")
-        else:
-            state['node_outputs'][f"{task['task_id']}_result"] = result
-            print(f"   [ExecutorNode] <- Успех. Задача '{task['task_id']}' выполнена.")
-
     except Exception as e:
-        print(f"   [ExecutorNode] !!! ОШИБКА при выполнении задачи '{task['task_id']}': {e}")
         task['status'] = 'FAILURE'
         state['error_message'] = str(e)
-
-    last_completed_task = state['completed_tasks'][-1] if state['completed_tasks'] else None
-    if not last_completed_task or last_completed_task['task_id'] != task['task_id']:
-         state['completed_tasks'].append(task)
-    else:
-         state['completed_tasks'][-1] = task
-         
+    state['completed_tasks'].append(task)
     state['current_task'] = None
     return state
 
 def qa_node(state: GraphState, assessor: QualityAssessorAgent) -> GraphState:
-    """Узел для первичной и повторной оценки качества фактов."""
     print("\n--- Узел: Quality Assessment ---")
     facts_to_assess = state['node_outputs'].get('facts_for_assessment', [])
     if not facts_to_assess:
         state['node_outputs']['good'], state['node_outputs']['fixable'] = [], []
         return state
-
     model = "gemma-3"
-    report = assessor.execute(facts_to_assess, model)
+    report = assessor.execute(facts_to_assess, model, state.get('user_config', {}))
     good, fixable = [], []
     assessments = {item['claim_id']: item for item in report.get('assessments', [])}
-    
     for fact in facts_to_assess:
         assessment = assessments.get(fact['claim_id'])
-        if assessment and assessment.get('is_ok'):
-            good.append(fact)
+        if assessment and assessment.get('is_ok'): good.append(fact)
         elif assessment and assessment.get('is_fixable'):
             fact['feedback'] = assessment.get('reason')
             fixable.append(fact)
-    
-    state['node_outputs']['good'] = good
-    state['node_outputs']['fixable'] = fixable
+    state['node_outputs']['good'], state['node_outputs']['fixable'] = good, fixable
     return state
 
 def fixer_node(state: GraphState, fixer: FixerAgent) -> GraphState:
-    """Узел для исправления фактов из 'серой зоны'."""
     print("\n--- Узел: Fixer ---")
     facts_to_fix = state['node_outputs'].get('fixable', [])
     if not facts_to_fix:
         state['node_outputs']['fixed'] = []
         return state
-        
     model = "gemma-3"
-    fixed_facts = fixer.execute(facts_to_fix, model)
+    fixed_facts = fixer.execute(facts_to_fix, model, state.get('user_config', {}))
     state['node_outputs']['fixed'] = fixed_facts
     return state
 
 def sanity_check_node(state: GraphState, critic: SanityCheckCritic) -> GraphState:
-    """Узел для финальной проверки на здравый смысл."""
     print("\n--- Узел: Sanity Check ---")
     candidates = state['node_outputs'].get('candidates_for_sanity_check', [])
     if not candidates:
         state['node_outputs']['final_facts'] = []
         return state
-    
     model = "gemini-2.5-flash"
-    final_facts = critic.execute(candidates, model)
+    final_facts = critic.execute(candidates, model, state.get('user_config', {}))
     state['node_outputs']['final_facts'] = final_facts
     return state
 
 def commit_node(state: GraphState) -> GraphState:
-    """Узел для сохранения верифицированных фактов в Базу Знаний."""
     print("\n--- Узел: Commit to KB ---")
     final_facts = state['node_outputs'].get('final_facts', [])
     current_kb = state.get('knowledge_base', {})
-    for fact in final_facts:
-        current_kb[fact['claim_id']] = fact
+    for fact in final_facts: current_kb[fact['claim_id']] = fact
     state['knowledge_base'] = current_kb
-    print(f"   [CommitNode] -> Добавлено/обновлено {len(final_facts)} фактов в Базе Знаний.")
     state['node_outputs'] = {'accumulated_raw_facts': []}
     return state
 
 def janitor_node(state: GraphState, janitor: KnowledgeJanitorAgent) -> GraphState:
-    """Узел для очистки и архивации Базы Знаний."""
     print("\n--- Узел: Janitor ---")
     state['knowledge_base'] = janitor.cleanup_knowledge_base(state['knowledge_base'])
     return state
 
 def reflection_node(state: GraphState, analyst: AnalystAgent, supervisor: SupervisorAgent) -> GraphState:
-    """Узел для анализа завершенной фазы и планирования следующей."""
     print("\n--- Узел: Reflection ---")
-    
-    analysis_result = analyst.execute_reflection(state['knowledge_base'], "gemini-2.5-flash")
-    
+    user_config = state.get('user_config', {})
+    analysis_result = analyst.execute_reflection(state['knowledge_base'], "gemini-2.5-flash", user_config)
     if not analysis_result or not analysis_result.get('data'):
-        print("   [Reflection] !!! Анализ не дал результатов. Завершаю работу.")
         state['task_queue'] = []
         return state
-
-    print("   [Reflection] -> Запрашиваю у Supervisor'а план следующей фазы...")
     next_phase_plan = supervisor.create_next_phase_plan(analysis_result['data'])
-
     new_tasks = next_phase_plan.get('tasks', [])
     if new_tasks:
-        print(f"   [Reflection] <- Получено {len(new_tasks)} новых задач. Добавляю в очередь.")
         state['task_queue'].extend(new_tasks)
         state['model_assignments'].update(next_phase_plan.get('initial_model_assignments', {}))
-    else:
-        print("   [Reflection] <- Supervisor не сгенерировал новых задач. План считается выполненным.")
-
     return state
 
 def architect_node(state: GraphState, architect: ArchitectAgent) -> GraphState:
-    """Узел для самокоррекции системы через мета-агента."""
     print("\n--- Узел: Architect ---")
     task = state['current_task']
     error = state.get('error_message', 'Нет деталей')
-
-
     remediated_task = architect.fix_or_enhance(task, error)
-    
     state['task_queue'].insert(0, remediated_task)
     state['escalation_count'] = 0
     state['current_task'] = None
-    print(f"   [ArchitectNode] Задача {task['task_id']} исправлена и возвращена в очередь.")
     return state
 
 def final_report_node(state: GraphState, analyst: AnalystAgent, writer: ReportWriterAgent, output_dir: str) -> GraphState:
-    """Узел для генерации финального отчета."""
     print("\n--- Узел: Final Report ---")
-    analysis_data = analyst.execute_final_synthesis(state['knowledge_base'], "gemini-2.5-flash")
+    user_config = state.get('user_config', {})
+    analysis_data = analyst.execute_final_synthesis(state['knowledge_base'], "gemini-2.5-flash", user_config)
     if not analysis_data: return state
-    report_content = writer.execute(analysis_data, "gemma-3")
+    report_content = writer.execute(analysis_data, "gemma-3", user_config)
     if not report_content: return state
     final_markdown = citation_post_processor(report_content, state['knowledge_base'])
     report_path = os.path.join(output_dir, "Final_Report_v4.1.md")
     with open(report_path, "w", encoding="utf-8") as f: f.write(final_markdown)
-    print(f"   [FinalReportNode] -> Финальный отчет сохранен в {report_path}")
     return state
 
 # ====================================================================================
