@@ -32,11 +32,23 @@ class BatchQualityAssessmentReport(BaseModel):
     """Пакетный отчет контролера качества."""
     assessments: List[QualityAssessment] = Field(description="Список оценок для каждого факта в пакете.")
 
+class SanityCheckReport(BaseModel):
+    """Отчет от SanityCheckCritic, содержащий ID проверенных фактов."""
+    verified_claim_ids: List[str] = Field(description="Список ID фактов, которые успешно прошли финальную проверку на здравый смысл и релевантность.")
+
 # --- Модели для Аналитических и Мета-Агентов ---
 class AnalystReport(BaseModel):
     """Структурированный отчет от AnalystAgent для рефлексии."""
     key_insights: List[str] = Field(description="Список из 3-5 ключевых выводов.")
     data_gaps: List[str] = Field(description="Список из 2-3 обнаруженных пробелов в данных.")
+
+class FinalAnalysisReport(BaseModel):
+    """Структурированные данные для финального отчета, сгенерированные AnalystAgent."""
+    title: str = Field(description="Главный заголовок всего отчета.")
+    executive_summary: str = Field(description="Краткая выжимка (Executive Summary) на 2-3 абзаца.")
+    key_findings: List[Dict] = Field(description="Список ключевых находок, где каждый элемент - это словарь с ключами 'finding' (формулировка находки) и 'supporting_claim_ids' (список ID подтверждающих фактов).")
+    conclusion: str = Field(description="Финальное заключение, обобщающее результаты.")
+    recommendations: List[str] = Field(description="Список конкретных рекомендаций на основе анализа.")
 
 class JanitorReport(BaseModel):
     """Отчет от KnowledgeJanitorAgent."""
