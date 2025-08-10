@@ -50,6 +50,8 @@ def main():
     
     tool_smith = ToolSmithAgent(llm_client, budget_manager)
     architect = ArchitectAgent(llm_client, budget_manager, tool_smith, tool_registry)
+    
+    # ИСПРАВЛЕНИЕ: Добавляем ReviserAgent в словарь
     agents = {
         "Supervisor": SupervisorAgent(llm_client, budget_manager, tool_registry),
         "Reviser": ReviserAgent(llm_client, budget_manager),
@@ -87,7 +89,7 @@ def main():
             old_state = json.load(f)
         state_to_run = initial_state_template
         state_to_run["knowledge_base"] = old_state.get("knowledge_base", {})
-        state_to_run["visited_urls"] = old_state.get("visited_urls", []) # Переносим и URL
+        state_to_run["visited_urls"] = old_state.get("visited_urls", [])
         print(f"   [Main] <- База Знаний ({len(state_to_run['knowledge_base'])} фактов) перенесена в новую сессию.")
     elif os.path.exists(state_file_path):
         print(f"   [Main] РЕЖИМ: Продолжение. Загружаю состояние из '{state_file_path}'...")

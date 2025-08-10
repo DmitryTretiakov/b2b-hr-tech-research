@@ -52,7 +52,7 @@ def task_fetcher_node(state: GraphState) -> GraphState:
 
 def task_executor_node(state: GraphState, agents: dict) -> GraphState:
     """
-    Выполняет одну задачу. Для агентов-артефакторов внедряет Базу Знаний в задачу.
+    Выполняет одну задачу с детальным логированием ошибок.
     """
     print("\n--- Узел: Task Executor ---")
     task = state.get('current_task')
@@ -70,9 +70,7 @@ def task_executor_node(state: GraphState, agents: dict) -> GraphState:
         state['current_task'] = None
         return state
     
-    # --- ИНЪЕКЦИЯ КОНТЕКСТА ДЛЯ АГЕНТОВ-АРТЕФАКТОРОВ ---
     if agent_name in ["FinancialModelAgent", "ProductManagerAgent"]:
-        print(f"   [Executor] Внедряю полную Базу Знаний в задачу для {agent_name}...")
         task["knowledge_base"] = state.get("knowledge_base", {})
 
     try:
@@ -82,14 +80,23 @@ def task_executor_node(state: GraphState, agents: dict) -> GraphState:
         
         if agent_name in ["Researcher", "Contrarian"]:
             state['node_outputs']['accumulated_raw_facts'].extend(result)
-        # --- СОХРАНЕНИЕ АРТЕФАКТОВ ---
         elif agent_name in ["FinancialModelAgent", "ProductManagerAgent"]:
             state.setdefault('artifacts', {})[task['task_id']] = result
             print(f"   [Executor] <- Артефакт '{task['task_id']}' успешно создан и сохранен.")
 
     except Exception as e:
+        # --- РАСШИРЕННОЕ ЛОГИРОВАНИЕ ---
+        print("\n" + "="*80)
+        print(f"!!! [Task Executor] ОШИБКА при выполнении задачи '{task.get('task_id')}' агентом '{agent_name}'.")
+        print(f"    Тип ошибки: {type(e).__name__}")
+        print(f"    Сообщение об ошибке: {e}")
+        import traceback
+        print("    Трассировка стека:")
+        traceback.print_exc()
+        print("="*80 + "\n")
+        
         task['status'] = 'FAILURE'
-        state['error_message'] = str(e)
+        state['error_message'] = str(e) # Сохраняем сообщение для ArchitectAgent
     
     state['completed_tasks'].append(task)
     state['current_task'] = None
@@ -285,45 +292,61 @@ def revision_node(state: GraphState, reviser: ReviserAgent, supervisor: Supervis
 
 # ... (все маршрутизаторы остаются без изменений) ...
 def escalation_router(state: GraphState) -> str:
-    """Маршрутизатор, реализующий логику Каскадной Эскалации."""
+    """
+    Маршрутизатор, реализующий логику Каскадной Эскалации.
+    """
     print("\n--- Узел: Escalation Router ---")
+    
+    # ИСПРАВЛЕНИЕ: Сразу получаем задачу, с которой будем работать.
+    # Это предотвращает ошибки индекса и делает логику чище.
+    if not state['completed_tasks']:
+        # Крайний случай, если узел был вызван без выполненных задач
+        return "fetcher"
     last_completed_task = state['completed_tasks'][-1]
     task_id = last_completed_task['task_id']
 
+    # --- Ветка УСПЕХА ---
     if last_completed_task['status'] == 'SUCCESS':
         print(f"   [EscalationRouter] Задача {task_id} успешна.")
         state['escalation_count'] = 0
         
-        # Если в очереди еще есть исследовательские задачи, продолжаем их выполнять
-        is_research_task = not last_completed_task['task_id'].startswith('artifact_')
+        is_research_task = not task_id.startswith('artifact_')
         remaining_research_tasks = any(not task['task_id'].startswith('artifact_') for task in state['task_queue'])
 
         if remaining_research_tasks:
             return "fetcher"
-        # Если это была последняя исследовательская задача, переходим к РЕВИЗИИ
         elif is_research_task and not remaining_research_tasks:
             print("   [EscalationRouter] -> Фаза исследования завершена. Перехожу к Ревизии.")
             return "revision"
-        # Если это была задача на артефакт, и других нет, идем дальше
         else:
-            return "fetcher" # Роутер артефактов разберется дальше
+            # Если это была задача на артефакт или другая, и очередь пуста,
+            # пусть следующий роутер (artifact_router) решает, что делать.
+            return "fetcher"
 
+    # --- Ветка НЕУДАЧИ ---
     print(f"   [EscalationRouter] !!! Задача {task_id} провалена.")
     escalation_count = state.get('escalation_count', 0)
     
-    if escalation_count >= MAX_ESCALATIONS:
-        print(f"   [EscalationRouter] !!! Лимит эскалаций ({MAX_ESCALATIONS}) исчерпан. Передаю Архитектору.")
-        state['current_task'] = state['completed_tasks'].pop()
+    # ИСПРАВЛЕНИЕ: Явная подготовка к передаче Архитектору
+    def escalate_to_architect(reason: str):
+        print(f"   [EscalationRouter] !!! {reason}. Передаю Архитектору.")
+        # Явно берем проваленную задачу из 'completed' и кладем ее в 'current' для архитектора.
+        failed_task = state['completed_tasks'].pop()
+        state['current_task'] = failed_task
         return "architect"
 
+    # Проверяем лимит попыток
+    if escalation_count >= MAX_ESCALATIONS:
+        return escalate_to_architect(f"Лимит эскалаций ({MAX_ESCALATIONS}) исчерпан")
+
+    # Проверяем, можно ли повысить модель
     current_model = state['model_assignments'][task_id]
     next_model = MODEL_ESCALATION_PATH.get(current_model)
 
     if not next_model or next_model == current_model:
-        print(f"   [EscalationRouter] !!! Модель '{current_model}' на пределе эскалации. Передаю Архитектору.")
-        state['current_task'] = state['completed_tasks'].pop()
-        return "architect"
+        return escalate_to_architect(f"Модель '{current_model}' на пределе эскалации")
 
+    # Если все проверки пройдены, эскалируем модель и возвращаем задачу в очередь
     print(f"   [EscalationRouter] -> Эскалирую задачу {task_id} на модель '{next_model}'.")
     state['escalation_count'] = escalation_count + 1
     state['model_assignments'][task_id] = next_model

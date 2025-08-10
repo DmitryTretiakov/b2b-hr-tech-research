@@ -32,18 +32,33 @@ class LLMClient:
 
     def invoke(self, model_name: str, prompt: str):
         """
-        Выполняет вызов к указанной модели с контролем бюджета.
+        Выполняет вызов к указанной модели с контролем бюджета и детальным логированием ошибок.
         """
         if not self.budget_manager.can_i_spend(model_name):
-            raise ConnectionError(f"Дневной лимит для модели {model_name} исчерпан.")
+            error_message = f"Дневной лимит для модели {model_name} исчерпан."
+            print(f"   [LLMClient] !!! ОШИБКА: {error_message}")
+            raise ConnectionError(error_message)
             
         print(f"   [LLMClient] -> Вызов модели Уровня '{self.get_level(model_name)}': {model_name}")
         
         instance = self._get_model_instance(model_name)
-        response = instance.invoke(prompt)
         
-        self.budget_manager.record_spend(model_name)
-        return response
+        try:
+            response = instance.invoke(prompt)
+            self.budget_manager.record_spend(model_name)
+            return response
+        except Exception as e:
+            # --- РАСШИРЕННОЕ ЛОГИРОВАНИЕ ---
+            print("\n" + "="*80)
+            print(f"!!! [LLMClient] КРИТИЧЕСКАЯ ОШИБКА при вызове API для модели '{model_name}'.")
+            print(f"    Тип ошибки: {type(e).__name__}")
+            print(f"    Сообщение об ошибке: {e}")
+            import traceback
+            print("    Трассировка стека:")
+            traceback.print_exc()
+            print("="*80 + "\n")
+            # Пробрасываем ошибку дальше, чтобы граф мог ее обработать
+            raise e
 
     def get_level(self, model_name: str) -> int:
         """Возвращает уровень иерархии для модели."""
