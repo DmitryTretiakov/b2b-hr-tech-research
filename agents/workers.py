@@ -6,7 +6,7 @@ from agents.base_agent import BaseAgent
 from utils.helpers import invoke_llm_for_json_with_retry
 from agents.models import (
     FactExtractionReport, BatchQualityAssessmentReport, AnalystReport, 
-    FinalReport, FinalAnalysisReport, SanityCheckReport,
+    FinalReport, FinalAnalysisReport, RevisionReport, SanityCheckReport,
     FinancialModelArtifact, UserStoryArtifact,
     ReportOutline, ReportSection # <-- ДОБАВИТЬ
 )
@@ -82,7 +82,7 @@ class BaseResearchAgent(BaseAgent):
                 conversation_history.append(f"OBSERVATION: Ошибка обработки ответа: {e}. Пожалуйста, верни JSON с ключом 'tool_to_use' или 'finish'.")
 
         final_synthesis_prompt = f"{self.role_prompt}\nПроанализируй всю переписку и извлеки 3-5 ключевых фактов. Заполни все поля.\n\n**ИСТОРИЯ РАБОТЫ:**\n{''.join(conversation_history)}"
-        synthesis_model = "gemini-2.5-flash"
+        synthesis_model = "gemini-2.5-pro"
         report = invoke_llm_for_json_with_retry(self.llm_client, synthesis_model, "gemini-2.5-flash-lite", final_synthesis_prompt, FactExtractionReport, self.budget_manager)
 
         if not report or 'extracted_facts' not in report: return []
@@ -110,20 +110,20 @@ class SanityCheckCritic(BaseAgent):
     def execute(self, facts_to_check: list, model_name: str, user_config: Dict) -> list:
         main_goal = user_config.get("user_context", {}).get("main_goal", "Цель не определена.")
         prompt = f"**Главная цель проекта:** {main_goal}\n\nТвоя роль: Старший аналитик. Проверь факты на коммерческую релевантность для достижения главной цели и отсутствие 'воды'. Верни JSON со списком `verified_claim_ids` тех, кто прошел проверку.\nФАКТЫ:\n{json.dumps(facts_to_check, ensure_ascii=False, indent=2)}"
-        report = invoke_llm_for_json_with_retry(self.llm_client, model_name, "gemini-2.5-flash", prompt, SanityCheckReport, self.budget_manager)
+        report = invoke_llm_for_json_with_retry(self.llm_client, "gemini-2.5-pro", "gemini-2.5-flash", prompt, SanityCheckReport, self.budget_manager)        
         verified_ids = set(report.get('verified_claim_ids', []))
         return [fact for fact in facts_to_check if fact['claim_id'] in verified_ids]
 
 class AnalystAgent(BaseAgent):
     def execute_reflection(self, knowledge_base: dict, model_name: str, user_config: Dict) -> dict:
         prompt = f"Твоя роль: Старший аналитик. Проанализируй Базу Знаний и предоставь краткую сводку для планировщика: 3-5 ключевых инсайтов и 2-3 пробела в данных.\nБАЗА ЗНАНИЙ:\n{json.dumps(knowledge_base, ensure_ascii=False, indent=2)}"
-        report = invoke_llm_for_json_with_retry(self.llm_client, model_name, "gemini-2.5-flash", prompt, AnalystReport, self.budget_manager)
+        report = invoke_llm_for_json_with_retry(self.llm_client, "gemini-2.5-pro", "gemini-2.5-flash", prompt, AnalystReport, self.budget_manager)
         return {"status": "SUCCESS", "data": report}
 
     def execute_final_synthesis(self, knowledge_base: dict, model_name: str, user_config: Dict) -> dict:
         main_goal = user_config.get("user_context", {}).get("main_goal", "Цель не определена.")
         prompt = f"**КОНТЕКСТ ПРОЕКТА:** {main_goal}\n\n**ТВОЯ РОЛЬ:** Ведущий аналитик-стратег.\n**ТВОЯ ЗАДАЧА:** Превратить базу фактов в структурированный аналитический документ, который поможет достичь цели проекта. Заполни ВСЕ поля JSON-схемы.\n\n**БАЗА ЗНАНИЙ:**\n{json.dumps(knowledge_base, ensure_ascii=False, indent=2)}"
-        return invoke_llm_for_json_with_retry(self.llm_client, model_name, "gemini-2.5-flash", prompt, FinalAnalysisReport, self.budget_manager)
+        return invoke_llm_for_json_with_retry(self.llm_client, "gemini-2.5-pro", "gemini-2.5-flash", prompt, FinalAnalysisReport, self.budget_manager)
 
 # --- НОВЫЕ АГЕНТЫ-СПЕЦИАЛИСТЫ ---
 
@@ -154,7 +154,7 @@ class FinancialModelAgent(BaseAgent):
 {json.dumps(knowledge_base, ensure_ascii=False, indent=2)}
 ```
 """
-        artifact = invoke_llm_for_json_with_retry(self.llm_client, model_name, "gemini-2.5-flash", prompt, FinancialModelArtifact, self.budget_manager)
+        artifact = invoke_llm_for_json_with_retry(self.llm_client, "gemini-2.5-pro", "gemini-2.5-flash", prompt, FinancialModelArtifact, self.budget_manager)
         return artifact
 
 class ProductManagerAgent(BaseAgent):
@@ -180,7 +180,7 @@ class ProductManagerAgent(BaseAgent):
 {json.dumps(knowledge_base, ensure_ascii=False, indent=2)}
 ```
 """
-        artifact = invoke_llm_for_json_with_retry(self.llm_client, model_name, "gemini-2.5-flash", prompt, UserStoryArtifact, self.budget_manager)
+        artifact = invoke_llm_for_json_with_retry(self.llm_client, "gemini-2.5-pro", "gemini-2.5-flash", prompt, UserStoryArtifact, self.budget_manager)
         return artifact
 
 class ReportWriterAgent(BaseAgent):
@@ -216,7 +216,7 @@ class ReportWriterAgent(BaseAgent):
 
 Верни только финальный `markdown_content`.
 """
-        report = invoke_llm_for_json_with_retry(self.llm_client, model_name, "gemini-2.5-flash", prompt, FinalReport, self.budget_manager)
+        report = invoke_llm_for_json_with_retry(self.llm_client, "gemini-2.5-pro", "gemini-2.5-flash", prompt, FinalReport, self.budget_manager)
         return report.get('markdown_content', '')
 
 
@@ -256,7 +256,7 @@ class ReviserAgent(BaseAgent):
 
 Верни результат в виде JSON, соответствующего схеме `RevisionReport`.
 """
-        report = invoke_llm_for_json_with_retry(self.llm_client, model_name, "gemini-2.5-flash", prompt, RevisionReport, self.budget_manager)
+        report = invoke_llm_for_json_with_retry(self.llm_client, "gemini-2.5-pro", "gemini-2.5-flash", prompt, RevisionReport, self.budget_manager)
         return report
     
 class OutlineAgent(BaseAgent):
@@ -282,7 +282,7 @@ class OutlineAgent(BaseAgent):
 {json.dumps(knowledge_base, ensure_ascii=False, indent=2)}
 ```
 """
-        outline = invoke_llm_for_json_with_retry(self.llm_client, model_name, "gemini-2.5-flash", prompt, ReportOutline, self.budget_manager)
+        outline = invoke_llm_for_json_with_retry(self.llm_client, "gemini-2.5-pro", "gemini-2.5-flash", prompt, ReportOutline, self.budget_manager)
         return outline
 
 class SectionWriterAgent(BaseAgent):
@@ -311,6 +311,6 @@ class SectionWriterAgent(BaseAgent):
 {json.dumps(knowledge_base, ensure_ascii=False, indent=2)}
 ```
 """
-        section = invoke_llm_for_json_with_retry(self.llm_client, model_name, "gemini-2.5-flash-lite", prompt, ReportSection, self.budget_manager)
+        section = invoke_llm_for_json_with_retry(self.llm_client, "gemini-2.5-flash", "gemini-2.5-flash-lite", prompt, ReportSection, self.budget_manager)
         return section
 

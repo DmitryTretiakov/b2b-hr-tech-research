@@ -131,7 +131,7 @@ def sanity_check_node(state: GraphState, critic: SanityCheckCritic) -> GraphStat
     if not candidates:
         state['node_outputs']['final_facts'] = []
         return state
-    model = "gemini-2.5-flash"
+    model = "gemini-2.5-pro"
     final_facts = critic.execute(candidates, model, state.get('user_config', {}))
     state['node_outputs']['final_facts'] = final_facts
     return state
@@ -181,7 +181,7 @@ def outline_node(state: GraphState, outline_agent: OutlineAgent) -> GraphState:
         "task_id": "outline_generation",
         "knowledge_base": state.get("knowledge_base", {})
     }
-    outline = outline_agent.execute(task, "gemini-2.5-flash", state.get('user_config', {}))
+    outline = outline_agent.execute(task, "gemini-2.5-pro", state.get('user_config', {})) # Было: "gemini-2.5-flash"
     state['report_outline'] = outline
     state['drafted_sections'] = [] # Инициализируем список для черновиков
     return state
@@ -214,7 +214,7 @@ def section_writer_node(state: GraphState, section_writer_agent: SectionWriterAg
     }
     
     # Используем дешевую модель для написания черновиков
-    written_section = section_writer_agent.execute(task, "gemma-3", state.get('user_config', {}))
+    written_section = section_writer_agent.execute(task, "gemini-2.5-flash", state.get('user_config', {})) # Было: "gemma-3"
     
     # Добавляем название секции к результату для компилятора
     full_section_data = {
@@ -232,7 +232,7 @@ def final_compile_node(state: GraphState, writer: ReportWriterAgent, output_dir:
         "drafted_sections": state.get('drafted_sections', []),
         "report_title": state.get('report_outline', {}).get('title', "Аналитический отчет")
     }
-    final_markdown = writer.execute(task, "gemini-2.5-flash", state.get('user_config', {}))
+    final_markdown = writer.execute(task, "gemini-2.5-pro", state.get('user_config', {})) # Было: "gemini-2.5-flash"
     
     # Пост-обработка цитат
     final_markdown_with_citations = citation_post_processor(final_markdown, state.get('knowledge_base', {}))
@@ -260,7 +260,7 @@ def revision_node(state: GraphState, reviser: ReviserAgent, supervisor: Supervis
     }
     
     # Используем модель среднего уровня для анализа
-    revision_report = reviser.execute(reviser_task, "gemini-2.5-flash", state.get('user_config', {}))
+    revision_report = reviser.execute(reviser_task, "gemini-2.5-pro", state.get('user_config', {})) # Было: "gemini-2.5-flash"
     
     # Сохраняем отчет для маршрутизатора
     state.setdefault('node_outputs', {})['revision_report'] = revision_report
