@@ -27,30 +27,11 @@ class BaseResearchAgent(BaseAgent):
             raise ValueError("ToolRegistry не был предоставлен этому агенту.")
 
         main_goal = user_config.get("user_context", {}).get("main_goal", "Цель не определена.")
-        # ИСПРАВЛЕНИЕ: visited_urls берутся из корня состояния, а не из user_config
         visited_urls_str = json.dumps(user_config.get('visited_urls', []), indent=2)
-        high_level_context = f"**КОНТЕКСТ ВСЕГО ПРОЕКТА:**\nТы работаешь над достижением следующей главной цели: '{main_goal}'. Твоя текущая задача - это один из шагов на пути к этой цели. Выполняй ее, держа в уме конечный результат.\n\n**УЖЕ ПОСЕЩЕННЫЕ URL (не используй их повторно):**\n{visited_urls_str}"
-
+        high_level_context = f"**КОНТЕКСТ ВСЕГО ПРОЕКТА:**\nТы работаешь над достижением следующей главной цели: '{main_goal}'.\n\n**УЖЕ ПОСЕЩЕННЫЕ URL (не используй их повторно):**\n{visited_urls_str}"
         available_tools = self.tool_registry.get_tools_for_prompt()
-        initial_prompt = f"""{self.role_prompt}
-{high_level_context}
-
-**ТВОЯ ТЕКУЩЯЯ ЗАДАЧА:** '{task['description']}'
-
-**ПРОЦЕСС РАБОТЫ (ReAct):**
-Ты работаешь в цикле "Мысль -> Действие -> Наблюдение".
-1.  **Мысль (Thought):** Проанализируй задачу и реши, какой инструмент использовать.
-2.  **Действие (Action):** Верни JSON-объект с вызовом инструмента или с решением завершить работу.
-
-**СПИСОК ИНСТРУМЕНТОВ:**
-{available_tools}
-
-**ФОРМАТ ВЫВОДА ДЛЯ ДЕЙСТВИЯ:**
-Верни JSON с ключом "tool_to_use" (для вызова инструмента) или "finish" (для завершения).
-Пример: `{{ "tool_to_use": {{ "tool_name": "web_search", "args": {{ "query": "..." }} }} }}`
-
-Начинай.
-"""
+        initial_prompt = f"{self.role_prompt}\n{high_level_context}\n\n**ТВОЯ ТЕКУЩАЯ ЗАДАЧА:** '{task['description']}'\n\n**ПРОЦЕСС РАБОТЫ (ReAct):**...\n**СПИСОК ИНСТРУМЕНТОВ:**\n{available_tools}\n\n**ФОРМАТ ВЫВОДА ДЛЯ ДЕЙСТВИЯ:**..."
+        
         conversation_history = [initial_prompt]
         max_turns = 5
         
@@ -58,32 +39,39 @@ class BaseResearchAgent(BaseAgent):
             print(f"      [ReAct] Итерация {i+1}/{max_turns}...")
             full_prompt = "\n".join(conversation_history)
             response = self.llm_client.invoke(model_name, full_prompt)
-            conversation_history.append(response.content)
+            
+            # --- НОВОЕ УСТОЙЧИВОЕ ЛОГИРОВАНИЕ И ПАРСИНГ ---
+            raw_content = response.content if hasattr(response, 'content') else ""
+            conversation_history.append(raw_content)
             
             try:
-                action_json_str = response.content[response.content.find('{'):response.content.rfind('}')+1]
-                action_data = json.loads(action_json_str)
+                # Пытаемся найти и распарсить JSON
+                json_part_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
+                if not json_part_match:
+                    raise ValueError("JSON-объект не найден в ответе модели.")
+                
+                action_data = json.loads(json_part_match.group(0))
 
                 if "tool_to_use" in action_data:
                     tool_call = action_data["tool_to_use"]
-                    tool_name = tool_call.get("tool_name")
-                    tool_args = tool_call.get("args", {})
-                    
-                    # ИСПРАВЛЕНИЕ: Передаем полный объект состояния (который пришел в user_config) в use_tool
-                    tool_result = self.tool_registry.use_tool(tool_name, tool_args, user_config)
+                    tool_result = self.tool_registry.use_tool(tool_call.get("tool_name"), tool_call.get("args", {}), user_config)
                     observation = f"OBSERVATION:\n```\n{str(tool_result)[:3000]}\n```"
                     conversation_history.append(observation)
-                    print(f"      [ReAct] Инструмент '{tool_name}' выполнен.")
                 elif "finish" in action_data:
-                    print("      [ReAct] Агент решил завершить сбор информации.")
                     break
-                else: raise ValueError("Неверный формат JSON-действия.")
+                else: 
+                    raise ValueError("Неверный формат JSON-действия (отсутствуют ключи 'tool_to_use' или 'finish').")
             except Exception as e:
+                print("\n" + "-"*80)
+                print(f"!!! [ReAct Parser] ОШИБКА парсинга ответа от модели '{model_name}'.")
+                print(f"    Тип ошибки: {type(e).__name__} - {e}")
+                print(f"    Сырой ответ модели, который не удалось распарсить:\n{raw_content}")
+                print("-"*80 + "\n")
                 conversation_history.append(f"OBSERVATION: Ошибка обработки ответа: {e}. Пожалуйста, верни JSON с ключом 'tool_to_use' или 'finish'.")
 
-        final_synthesis_prompt = f"{self.role_prompt}\nПроанализируй всю переписку и извлеки 3-5 ключевых фактов. Заполни все поля.\n\n**ИСТОРИЯ РАБОТЫ:**\n{''.join(conversation_history)}"
+        final_synthesis_prompt = f"{self.role_prompt}\nПроанализируй всю переписку и извлеки 3-5 ключевых фактов...\n\n**ИСТОРИЯ РАБОТЫ:**\n{''.join(conversation_history)}"
         synthesis_model = "gemini-2.5-pro"
-        report = invoke_llm_for_json_with_retry(self.llm_client, synthesis_model, "gemini-2.5-flash-lite", final_synthesis_prompt, FactExtractionReport, self.budget_manager)
+        report = invoke_llm_for_json_with_retry(self.llm_client, synthesis_model, "gemini-2.5-flash", final_synthesis_prompt, FactExtractionReport, self.budget_manager)
 
         if not report or 'extracted_facts' not in report: return []
         for fact in report['extracted_facts']: fact['created_at'] = datetime.now(timezone.utc).isoformat()

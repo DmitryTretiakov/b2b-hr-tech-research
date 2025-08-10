@@ -32,7 +32,7 @@ class LLMClient:
 
     def invoke(self, model_name: str, prompt: str):
         """
-        Выполняет вызов к указанной модели с контролем бюджета и детальным логированием ошибок.
+        Выполняет вызов к указанной модели с контролем бюджета и детальным логированием ошибок и ответов.
         """
         if not self.budget_manager.can_i_spend(model_name):
             error_message = f"Дневной лимит для модели {model_name} исчерпан."
@@ -45,10 +45,19 @@ class LLMClient:
         
         try:
             response = instance.invoke(prompt)
+            
+            # --- НОВОЕ ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ ОТВЕТА ---
+            if not response or not hasattr(response, 'content') or not response.content:
+                print("\n" + "="*80)
+                print(f"!!! [LLMClient] ВНИМАНИЕ: Получен ПУСТОЙ или НЕКОРРЕКТНЫЙ ответ от модели '{model_name}'.")
+                print(f"    Сырой ответ: {response}")
+                print("="*80 + "\n")
+                # Мы не вызываем исключение, чтобы позволить агенту обработать пустой ответ,
+                # но мы оставляем четкий след в логах.
+            
             self.budget_manager.record_spend(model_name)
             return response
         except Exception as e:
-            # --- РАСШИРЕННОЕ ЛОГИРОВАНИЕ ---
             print("\n" + "="*80)
             print(f"!!! [LLMClient] КРИТИЧЕСКАЯ ОШИБКА при вызове API для модели '{model_name}'.")
             print(f"    Тип ошибки: {type(e).__name__}")
@@ -57,7 +66,6 @@ class LLMClient:
             print("    Трассировка стека:")
             traceback.print_exc()
             print("="*80 + "\n")
-            # Пробрасываем ошибку дальше, чтобы граф мог ее обработать
             raise e
 
     def get_level(self, model_name: str) -> int:

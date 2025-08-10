@@ -15,11 +15,11 @@ import json
 import traceback
 
 # --- Константы для эскалации ---
-MAX_ESCALATIONS = 1
+MAX_ESCALATIONS_PER_TASK = 2
 MODEL_ESCALATION_PATH = {
     "gemma-3": "gemini-2.5-flash-lite",
     "gemini-2.5-flash-lite": "gemini-2.5-flash",
-    "gemini-2.5-flash": "gemini-2.5-flash"
+    "gemini-2.5-flash": None
 }
 
 # ====================================================================================
@@ -38,12 +38,10 @@ def supervisor_node(state: GraphState, supervisor: SupervisorAgent) -> GraphStat
 
 def task_fetcher_node(state: GraphState) -> GraphState:
     """
-    Узел, который берет следующую задачу из очереди и помещает ее в 'current_task'.
+    Берет задачу из очереди. НЕ сбрасывает счетчик эскалации.
     """
     print("\n--- Узел: Task Fetcher ---")
-    if not state['task_queue']:
-        return state
-    
+    if not state['task_queue']: return state
     task = state['task_queue'].pop(0)
     state['current_task'] = task
     state['error_message'] = None
@@ -57,7 +55,6 @@ def task_executor_node(state: GraphState, agents: dict) -> GraphState:
     print("\n--- Узел: Task Executor ---")
     task = state.get('current_task')
     if not task: return state
-    
     agent_name = task['agent_name']
     agent = agents.get(agent_name)
     model = state['model_assignments'].get(task['task_id'])
@@ -65,35 +62,23 @@ def task_executor_node(state: GraphState, agents: dict) -> GraphState:
     if not agent or not model:
         task['status'] = 'FAILURE'
         state['error_message'] = f"Агент {agent_name} или модель не найдены."
-        state['completed_tasks'].append(task)
-        state['current_task'] = None
-        return state
-    
-    if agent_name in ["FinancialModelAgent", "ProductManagerAgent"]:
-        task["knowledge_base"] = state.get("knowledge_base", {})
-
-    try:
-        full_state_for_tools = state.copy()
-        result = agent.execute(task, model, full_state_for_tools)
-        task['status'] = 'SUCCESS'
-        
-        if agent_name in ["Researcher", "Contrarian"]:
-            state['node_outputs']['accumulated_raw_facts'].extend(result)
-        elif agent_name in ["FinancialModelAgent", "ProductManagerAgent"]:
-            state.setdefault('artifacts', {})[task['task_id']] = result
-            print(f"   [Executor] <- Артефакт '{task['task_id']}' успешно создан и сохранен.")
-
-    except Exception as e:
-        print("\n" + "="*80)
-        print(f"!!! [Task Executor] ОШИБКА при выполнении задачи '{task.get('task_id')}' агентом '{agent_name}'.")
-        print(f"    Тип ошибки: {type(e).__name__}")
-        print(f"    Сообщение об ошибке: {e}")
-        print("    Трассировка стека:")
-        traceback.print_exc()
-        print("="*80 + "\n")
-        
-        task['status'] = 'FAILURE'
-        state['error_message'] = str(e)
+    else:
+        try:
+            result = agent.execute(task, model, state.copy())
+            task['status'] = 'SUCCESS'
+            if agent_name in ["Researcher", "Contrarian"]:
+                state['node_outputs']['accumulated_raw_facts'].extend(result)
+            elif agent_name in ["FinancialModelAgent", "ProductManagerAgent"]:
+                state.setdefault('artifacts', {})[task['task_id']] = result
+        except Exception as e:
+            print("\n" + "="*80)
+            print(f"!!! [Task Executor] ОШИБКА при выполнении задачи '{task.get('task_id')}' агентом '{agent_name}'.")
+            print(f"    Тип ошибки: {type(e).__name__}")
+            print(f"    Сообщение об ошибке: {e}")
+            traceback.print_exc()
+            print("="*80 + "\n")
+            task['status'] = 'FAILURE'
+            state['error_message'] = str(e)
     
     state['completed_tasks'].append(task)
     state['current_task'] = None
@@ -170,27 +155,26 @@ def reflection_node(state: GraphState, analyst: AnalystAgent, supervisor: Superv
 
 def architect_node(state: GraphState, architect: ArchitectAgent) -> GraphState:
     """
-    Узел для самокоррекции. Теперь он устанавливает статус для роутера.
+    Узел для самокоррекции. Сам берет задачу из списка выполненных.
     """
     print("\n--- Узел: Architect ---")
-    task_to_fix = state.get('current_task')
     
-    # ИСПРАВЛЕНИЕ: Убираем "защиту", которая приводила к молчаливому провалу.
-    # Теперь мы доверяем, что escalation_router передал нам задачу.
-    if not task_to_fix:
-        print("!!! [ArchitectNode] КРИТИЧЕСКАЯ ОШИБКА: В узел Архитектора не была передана задача. Завершаю работу.")
-        state['error_message'] = "ArchitectNode received no task."
-        # Устанавливаем статус для нового роутера
+    if not state['completed_tasks']:
+        print("!!! [ArchitectNode] КРИТИЧЕСКАЯ ОШИБКА: Нет задач в списке выполненных для анализа.")
         state.setdefault('node_outputs', {})['architect_status'] = 'FATAL_ERROR'
         return state
+
+    # ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: Архитектор сам берет последнюю проваленную задачу.
+    task_to_fix = state['completed_tasks'].pop()
+    print(f"   [ArchitectNode] Взял на исправление задачу: {task_to_fix.get('task_id')}")
 
     error = state.get('error_message', 'Нет деталей')
     remediated_task = architect.fix_or_enhance(task_to_fix, error)
     
-    # Если задача не изменилась, значит, архитектор не смог ее исправить.
     if remediated_task == task_to_fix:
         print("   [ArchitectNode] <- Архитектор не смог внести исправления. Сигнализирую о фатальной ошибке.")
         state.setdefault('node_outputs', {})['architect_status'] = 'FATAL_ERROR'
+        state['completed_tasks'].append(task_to_fix) # Возвращаем задачу, чтобы не терять историю
     else:
         print(f"   [ArchitectNode] <- Задача {task_to_fix['task_id']} исправлена и возвращена в очередь.")
         state['task_queue'].insert(0, remediated_task)
@@ -296,37 +280,32 @@ def escalation_router(state: GraphState) -> str:
     print("\n--- Узел: Escalation Router ---")
     if not state['completed_tasks']: return "fetcher"
     last_completed_task = state['completed_tasks'][-1]
-    task_id = last_completed_task['task_id']
-
+    
     if last_completed_task['status'] == 'SUCCESS':
         state['escalation_count'] = 0
-        is_research_task = not task_id.startswith('artifact_')
-        remaining_research_tasks = any(not task['task_id'].startswith('artifact_') for task in state['task_queue'])
-        if remaining_research_tasks: return "fetcher"
-        elif is_research_task and not remaining_research_tasks:
-            return "revision"
-        else: return "fetcher"
+        is_research = not last_completed_task['task_id'].startswith('artifact_')
+        remaining_research = any(not t['task_id'].startswith('artifact_') for t in state['task_queue'])
+        if is_research and not remaining_research: return "revision"
+        return "fetcher"
 
-    print(f"   [EscalationRouter] !!! Задача {task_id} провалена.")
-    escalation_count = state.get('escalation_count', 0)
+    print(f"   [EscalationRouter] !!! Задача {last_completed_task['task_id']} провалена.")
     
-    def escalate_to_architect(reason: str):
-        print(f"   [EscalationRouter] !!! {reason}. Передаю Архитектору.")
-        failed_task = state['completed_tasks'].pop()
-        state['current_task'] = failed_task
+    escalation_count = state.get('escalation_count', 0) + 1
+    state['escalation_count'] = escalation_count
+    
+    if escalation_count > MAX_ESCALATIONS_PER_TASK:
+        print(f"   [EscalationRouter] !!! Лимит эскалаций ({MAX_ESCALATIONS_PER_TASK}) исчерпан. Передаю Архитектору.")
         return "architect"
 
-    if escalation_count >= MAX_ESCALATIONS:
-        return escalate_to_architect(f"Лимит эскалаций ({MAX_ESCALATIONS}) исчерпан")
-
-    current_model = state['model_assignments'][task_id]
+    current_model = state['model_assignments'][last_completed_task['task_id']]
     next_model = MODEL_ESCALATION_PATH.get(current_model)
-    if not next_model or next_model == current_model:
-        return escalate_to_architect(f"Модель '{current_model}' на пределе эскалации")
+    
+    if not next_model:
+        print(f"   [EscalationRouter] !!! Модель '{current_model}' на пределе эскалации. Передаю Архитектору.")
+        return "architect"
 
-    print(f"   [EscalationRouter] -> Эскалирую задачу {task_id} на модель '{next_model}'.")
-    state['escalation_count'] = escalation_count + 1
-    state['model_assignments'][task_id] = next_model
+    print(f"   [EscalationRouter] -> Эскалирую задачу на модель '{next_model}' (Попытка {escalation_count}).")
+    state['model_assignments'][last_completed_task['task_id']] = next_model
     failed_task = state['completed_tasks'].pop()
     failed_task['status'] = 'PENDING'
     state['task_queue'].insert(0, failed_task)
