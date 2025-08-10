@@ -33,6 +33,7 @@ class GraphState(TypedDict):
     completed_tasks: List[Task]
     knowledge_base: Dict[str, KnowledgeUnit]
     artifacts: Dict[str, Dict]  # <-- НОВОЕ ПОЛЕ ДЛЯ ХРАНЕНИЯ АРТЕФАКТОВ
+    visited_urls: List[str]
     
     # Поля для управления эскалацией
     current_task: Optional[Task]
@@ -42,3 +43,8 @@ class GraphState(TypedDict):
     # Поля для передачи результатов между узлами
     error_message: Optional[str]
     node_outputs: Dict[str, List]
+
+    # Поля для многоэтапного написания отчета
+    report_outline: Optional[Dict]
+    drafted_sections: List[Dict]
+    current_section_to_draft: Optional[Dict]

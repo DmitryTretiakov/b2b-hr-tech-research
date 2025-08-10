@@ -88,3 +88,18 @@ class GraphPlan(BaseModel):
     """Pydantic-модель для описания плана графа."""
     tasks: List[Dict] = Field(description="Список всех задач, которые нужно выполнить (например, {'task_id': 'res_01', 'agent_name': 'Researcher', 'description': '...'})")
     initial_model_assignments: Dict[str, str] = Field(description="Словарь {task_id: model_name} с начальным распределением моделей.")
+
+class RevisionReport(BaseModel):
+    """Модель для вердикта ReviserAgent."""
+    is_sufficient: bool = Field(description="True, если собранной информации достаточно и можно переходить к следующему этапу (QA).")
+    feedback: str = Field(description="Конструктивная критика и конкретные предложения по следующим шагам, если информация неполна. Например, 'Собраны данные только по рынку РФ, необходимо исследовать рынок СНГ.'")
+    new_task_suggestions: List[str] = Field(description="Список формулировок для новых исследовательских задач, если они необходимы.")
+
+class ReportOutline(BaseModel):
+    """Структура для плана (оглавления) финального отчета."""
+    title: str = Field(description="Главный заголовок всего отчета.")
+    sections: List[Dict[str, str]] = Field(description="Список секций отчета, где каждый элемент - это словарь с ключами 'section_title' и 'section_description' (о чем писать в этой секции).")
+
+class ReportSection(BaseModel):
+    """Структура для текста одной секции отчета."""
+    markdown_content: str = Field(description="Полностью написанный текст для одной секции в формате Markdown.")

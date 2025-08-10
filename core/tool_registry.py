@@ -96,9 +96,9 @@ class ToolRegistry:
         
         return "\n".join(descriptions)
 
-    def use_tool(self, name: str, args: Dict[str, Any]) -> Any:
+    def use_tool(self, name: str, args: Dict[str, Any], state: Dict) -> Any:
         """
-        Выполняет указанный инструмент с предоставленными аргументами.
+        Выполняет указанный инструмент и обновляет состояние графа (например, visited_urls).
         """
         if name not in self.tools:
             return f"Ошибка: Инструмент '{name}' не найден."
@@ -106,7 +106,24 @@ class ToolRegistry:
         tool_func = self.tools[name]
         print(f"   [ToolRegistry] -> Выполняю инструмент '{name}' с аргументами: {args}")
         try:
+            # --- ЛОГИКА ОБНОВЛЕНИЯ СОСТОЯНИЯ ---
+            # Если это поисковый инструмент, мы можем извлечь URL из его результата
+            if name == 'web_search':
+                # Сначала проверяем, нет ли URL уже в аргументах (например, для чтения конкретной страницы)
+                url_to_check = args.get('url') or args.get('link')
+                if url_to_check and url_to_check in state.get('visited_urls', []):
+                    print(f"   [ToolRegistry] <- URL '{url_to_check}' уже посещался. Пропускаю.")
+                    return "Информация с этого URL уже была проанализирована ранее."
+
             result = tool_func(**args)
+
+            # После выполнения извлекаем URL из результата, если возможно
+            if isinstance(result, dict) and 'items' in result:
+                urls_found = [item.get('link') for item in result['items'] if item.get('link')]
+                if urls_found:
+                    state.setdefault('visited_urls', []).extend(urls_found)
+                    print(f"   [ToolRegistry] Добавлено {len(urls_found)} URL в список посещенных.")
+            
             print(f"   [ToolRegistry] <- Инструмент '{name}' успешно выполнен.")
             return result
         except Exception as e:

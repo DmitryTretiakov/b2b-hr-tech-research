@@ -5,8 +5,10 @@ from agents.supervisor import SupervisorAgent
 from agents.workers import (
     ResearcherAgent, ContrarianAgent, QualityAssessorAgent, FixerAgent, 
     AnalystAgent, ReportWriterAgent, SanityCheckCritic,
-    FinancialModelAgent, ProductManagerAgent
+    FinancialModelAgent, ProductManagerAgent, ReviserAgent,
+    OutlineAgent, SectionWriterAgent # <-- ДОБАВИТЬ
 )
+
 from agents.meta_agents import ArchitectAgent, KnowledgeJanitorAgent
 from utils.helpers import citation_post_processor
 import os
@@ -74,7 +76,8 @@ def task_executor_node(state: GraphState, agents: dict) -> GraphState:
         task["knowledge_base"] = state.get("knowledge_base", {})
 
     try:
-        result = agent.execute(task, model, user_config)
+        full_state_for_tools = state.copy()
+        result = agent.execute(task, model, full_state_for_tools)
         task['status'] = 'SUCCESS'
         
         if agent_name in ["Researcher", "Contrarian"]:
@@ -171,16 +174,109 @@ def architect_node(state: GraphState, architect: ArchitectAgent) -> GraphState:
     state['current_task'] = None
     return state
 
-def final_report_node(state: GraphState, analyst: AnalystAgent, writer: ReportWriterAgent, output_dir: str) -> GraphState:
-    print("\n--- Узел: Final Report ---")
-    user_config = state.get('user_config', {})
-    analysis_data = analyst.execute_final_synthesis(state['knowledge_base'], "gemini-2.5-flash", user_config)
-    if not analysis_data: return state
-    report_content = writer.execute(analysis_data, "gemma-3", user_config)
-    if not report_content: return state
-    final_markdown = citation_post_processor(report_content, state['knowledge_base'])
-    report_path = os.path.join(output_dir, "Final_Report_v4.1.md")
-    with open(report_path, "w", encoding="utf-8") as f: f.write(final_markdown)
+def outline_node(state: GraphState, outline_agent: OutlineAgent) -> GraphState:
+    """Узел для создания плана финального отчета."""
+    print("\n--- Узел: Report Outline ---")
+    task = {
+        "task_id": "outline_generation",
+        "knowledge_base": state.get("knowledge_base", {})
+    }
+    outline = outline_agent.execute(task, "gemini-2.5-flash", state.get('user_config', {}))
+    state['report_outline'] = outline
+    state['drafted_sections'] = [] # Инициализируем список для черновиков
+    return state
+
+def section_fetcher_node(state: GraphState) -> GraphState:
+    """Узел, который берет следующую секцию из плана для написания."""
+    print("\n--- Узел: Section Fetcher ---")
+    outline_sections = state.get('report_outline', {}).get('sections', [])
+    num_drafted = len(state.get('drafted_sections', []))
+    
+    if num_drafted < len(outline_sections):
+        section_to_draft = outline_sections[num_drafted]
+        state['current_section_to_draft'] = section_to_draft
+        print(f"   [SectionFetcher] -> Взял в работу секцию: '{section_to_draft.get('section_title')}'")
+    else:
+        state['current_section_to_draft'] = None
+    return state
+
+def section_writer_node(state: GraphState, section_writer_agent: SectionWriterAgent) -> GraphState:
+    """Узел для написания текста одной секции."""
+    print("\n--- Узел: Section Writer ---")
+    section_to_draft = state.get('current_section_to_draft')
+    if not section_to_draft:
+        return state
+        
+    task = {
+        "task_id": f"write_section_{section_to_draft.get('section_title', '').replace(' ', '_')}",
+        "section_to_draft": section_to_draft,
+        "knowledge_base": state.get("knowledge_base", {})
+    }
+    
+    # Используем дешевую модель для написания черновиков
+    written_section = section_writer_agent.execute(task, "gemma-3", state.get('user_config', {}))
+    
+    # Добавляем название секции к результату для компилятора
+    full_section_data = {
+        "section_title": section_to_draft.get('section_title'),
+        "markdown_content": written_section.get('markdown_content', '')
+    }
+    state['drafted_sections'].append(full_section_data)
+    return state
+
+def final_compile_node(state: GraphState, writer: ReportWriterAgent, output_dir: str) -> GraphState:
+    """Узел для финальной сборки отчета."""
+    print("\n--- Узел: Final Compilation ---")
+    task = {
+        "task_id": "final_compilation",
+        "drafted_sections": state.get('drafted_sections', []),
+        "report_title": state.get('report_outline', {}).get('title', "Аналитический отчет")
+    }
+    final_markdown = writer.execute(task, "gemini-2.5-flash", state.get('user_config', {}))
+    
+    # Пост-обработка цитат
+    final_markdown_with_citations = citation_post_processor(final_markdown, state.get('knowledge_base', {}))
+    
+    report_path = os.path.join(output_dir, "Final_Report_v4.2.md")
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(final_markdown_with_citations)
+    print(f"   [FinalCompileNode] -> Финальный отчет сохранен в {report_path}")
+    return state
+
+
+def revision_node(state: GraphState, reviser: ReviserAgent, supervisor: SupervisorAgent) -> GraphState:
+    """
+    Узел для критики собранной информации и, при необходимости,
+    создания новых, корректирующих задач.
+    """
+    print("\n--- Узел: Revision ---")
+    
+    # Формируем задачу для ревизора
+    reviser_task = {
+        "task_id": "revision_01",
+        "description": "Провести ревизию текущего состояния исследования.",
+        "knowledge_base": state.get("knowledge_base", {}),
+        "remaining_tasks": state.get("task_queue", [])
+    }
+    
+    # Используем модель среднего уровня для анализа
+    revision_report = reviser.execute(reviser_task, "gemini-2.5-flash", state.get('user_config', {}))
+    
+    # Сохраняем отчет для маршрутизатора
+    state.setdefault('node_outputs', {})['revision_report'] = revision_report
+    
+    if not revision_report.get('is_sufficient') and revision_report.get('new_task_suggestions'):
+        print("   [RevisionNode] -> Ревизор счел информацию недостаточной. Запрашиваю у Supervisor'а новые задачи...")
+        # Используем Supervisor'а для "допланирования" на основе фидбека
+        # (Это упрощенный вызов, в идеале Supervisor должен иметь отдельный метод для этого)
+        feedback_prompt = f"Критик дал следующий фидбек: '{revision_report['feedback']}'. Сгенерируй план из следующих задач: {revision_report['new_task_suggestions']}"
+        new_plan = supervisor.create_initial_plan({"user_context": {"main_goal": feedback_prompt}}) # Упрощенная передача
+        
+        if new_plan and new_plan.get('tasks'):
+            print(f"   [RevisionNode] <- Получено {len(new_plan['tasks'])} новых корректирующих задач.")
+            state['task_queue'].extend(new_plan['tasks'])
+            state['model_assignments'].update(new_plan.get('initial_model_assignments', {}))
+
     return state
 
 # ====================================================================================
@@ -197,12 +293,20 @@ def escalation_router(state: GraphState) -> str:
     if last_completed_task['status'] == 'SUCCESS':
         print(f"   [EscalationRouter] Задача {task_id} успешна.")
         state['escalation_count'] = 0
-        if state['task_queue']:
+        
+        # Если в очереди еще есть исследовательские задачи, продолжаем их выполнять
+        is_research_task = not last_completed_task['task_id'].startswith('artifact_')
+        remaining_research_tasks = any(not task['task_id'].startswith('artifact_') for task in state['task_queue'])
+
+        if remaining_research_tasks:
             return "fetcher"
+        # Если это была последняя исследовательская задача, переходим к РЕВИЗИИ
+        elif is_research_task and not remaining_research_tasks:
+            print("   [EscalationRouter] -> Фаза исследования завершена. Перехожу к Ревизии.")
+            return "revision"
+        # Если это была задача на артефакт, и других нет, идем дальше
         else:
-            print("   [EscalationRouter] -> Фаза исследования завершена. Перехожу к QA.")
-            state['node_outputs']['facts_for_assessment'] = state['node_outputs'].get('accumulated_raw_facts', [])
-            return "qa"
+            return "fetcher" # Роутер артефактов разберется дальше
 
     print(f"   [EscalationRouter] !!! Задача {task_id} провалена.")
     escalation_count = state.get('escalation_count', 0)
@@ -269,6 +373,36 @@ def artifact_router(state: GraphState) -> str:
     else:
         print("   [ArtifactRouter] -> Задачи на создание артефактов отсутствуют. Перехожу к очистке.")
         return "janitor"
+    
+def revision_router(state: GraphState) -> str:
+    """
+    Маршрутизатор, который решает, продолжать ли исследование или переходить к QA.
+    """
+    print("\n--- Узел: Revision Router ---")
+    revision_report = state.get('node_outputs', {}).get('revision_report', {})
+    
+    if not revision_report.get('is_sufficient'):
+        print("   [RevisionRouter] -> Добавлены новые задачи. Возвращаюсь к исполнителю.")
+        return "fetcher"
+    else:
+        print("   [RevisionRouter] -> Информация признана достаточной. Перехожу к QA.")
+        # Подготавливаем данные для QA, как это делалось раньше
+        state['node_outputs']['facts_for_assessment'] = state['node_outputs'].get('accumulated_raw_facts', [])
+        return "qa"
+    
+def section_writing_router(state: GraphState) -> str:
+    """Маршрутизатор, управляющий циклом написания секций."""
+    print("\n--- Узел: Section Writing Router ---")
+    outline_sections = state.get('report_outline', {}).get('sections', [])
+    num_drafted = len(state.get('drafted_sections', []))
+    
+    if num_drafted < len(outline_sections):
+        print(f"   [SectionRouter] -> Написано {num_drafted}/{len(outline_sections)}. Продолжаю цикл.")
+        return "fetcher"
+    else:
+        print("   [SectionRouter] -> Все секции написаны. Перехожу к финальной компиляции.")
+        return "compiler"
+
 
 # ====================================================================================
 # === 3. СБОРКА ГРАФА (WORKFLOW COMPILATION) =========================================
@@ -290,7 +424,12 @@ def build_graph(agents: dict, output_dir: str):
     workflow.add_node("commit", commit_node)
     workflow.add_node("janitor", lambda state: janitor_node(state, agents['Janitor']))
     workflow.add_node("reflection", lambda state: reflection_node(state, agents['Analyst'], agents['Supervisor']))
-    workflow.add_node("final_report", lambda state: final_report_node(state, agents['Analyst'], agents['ReportWriter'], output_dir))
+    workflow.add_node("outline", lambda state: outline_node(state, agents['OutlineAgent']))
+    workflow.add_node("section_fetcher", section_fetcher_node)
+    workflow.add_node("section_writer", lambda state: section_writer_node(state, agents['SectionWriterAgent']))
+    workflow.add_node("final_compiler", lambda state: final_compile_node(state, agents['ReportWriter'], output_dir))
+
+    workflow.add_node("revision", lambda state: revision_node(state, agents['Reviser'], agents['Supervisor']))
 
     # --- ПЕРЕСТРОЙКА ЛОГИКИ ГРАФА ---
     workflow.set_entry_point("supervisor")
@@ -298,15 +437,18 @@ def build_graph(agents: dict, output_dir: str):
     workflow.add_edge("task_fetcher", "task_executor")
     
     # Основной цикл исследования и самокоррекции
-    workflow.add_conditional_edges("task_executor", escalation_router, {
+    workflow.add_conditional_edges("reflection", reflection_router, {
         "fetcher": "task_fetcher",
-        "qa": "qa",
-        "architect": "architect"
+        "final_report": "outline" # <-- ИЗМЕНЕНИЕ: ведем на создание плана
     })
+
     workflow.add_edge("architect", "task_fetcher")
 
     # Конвейер QA
-    workflow.add_conditional_edges("qa", qa_router, {"fixer": "fixer", "sanity_check": "sanity_check"})
+    workflow.add_conditional_edges("revision", revision_router, {
+        "fetcher": "task_fetcher", # Если нужны новые задачи
+        "qa": "qa"                 # Если все хорошо
+    })
     workflow.add_edge("fixer", "qa_reassessment")
     workflow.add_conditional_edges("qa_reassessment", reassessment_router, {"sanity_check": "sanity_check"})
     workflow.add_edge("sanity_check", "commit")
@@ -323,8 +465,14 @@ def build_graph(agents: dict, output_dir: str):
         "fetcher": "task_fetcher",
         "final_report": "final_report"
     })
+    workflow.add_edge("outline", "section_fetcher")
+    workflow.add_edge("section_fetcher", "section_writer")
+    workflow.add_conditional_edges("section_writer", section_writing_router, {
+        "fetcher": "section_fetcher", # Цикл
+        "compiler": "final_compiler"  # Выход из цикла
+    })
+    workflow.add_edge("final_compiler", END)
 
-    workflow.add_edge("final_report", END)
 
     return workflow.compile()
 

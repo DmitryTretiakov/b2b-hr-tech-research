@@ -7,7 +7,8 @@ from utils.helpers import invoke_llm_for_json_with_retry
 from agents.models import (
     FactExtractionReport, BatchQualityAssessmentReport, AnalystReport, 
     FinalReport, FinalAnalysisReport, SanityCheckReport,
-    FinancialModelArtifact, UserStoryArtifact  # <-- ИМПОРТ НОВЫХ МОДЕЛЕЙ
+    FinancialModelArtifact, UserStoryArtifact,
+    ReportOutline, ReportSection # <-- ДОБАВИТЬ
 )
 
 class BaseResearchAgent(BaseAgent):
@@ -26,8 +27,7 @@ class BaseResearchAgent(BaseAgent):
             raise ValueError("ToolRegistry не был предоставлен этому агенту.")
 
         main_goal = user_config.get("user_context", {}).get("main_goal", "Цель не определена.")
-        high_level_context = f"**КОНТЕКСТ ВСЕГО ПРОЕКТА:**\nТы работаешь над достижением следующей главной цели: '{main_goal}'. Твоя текущая задача - это один из шагов на пути к этой цели. Выполняй ее, держа в уме конечный результат."
-
+        high_level_context = f"**КОНТЕКСТ ВСЕГО ПРОЕКТА:**\nТы работаешь над достижением следующей главной цели: '{main_goal}'. Твоя текущая задача - это один из шагов на пути к этой цели. Выполняй ее, держа в уме конечный результат.\n\n**УЖЕ ПОСЕЩЕННЫЕ URL (не используй их повторно):**\n{json.dumps(user_config.get('visited_urls', []), indent=2)}"
         available_tools = self.tool_registry.get_tools_for_prompt()
         initial_prompt = f"""{self.role_prompt}
 {high_level_context}
@@ -175,10 +175,133 @@ class ProductManagerAgent(BaseAgent):
         return artifact
 
 class ReportWriterAgent(BaseAgent):
-    """Пишет финальный отчет по структурированным данным."""
-    def execute(self, analysis_data: dict, model_name: str, user_config: Dict) -> str:
-        print(f"   [ReportWriterAgent] -> Пишу отчет на модели {model_name}...")
+    """Собирает финальный отчет из написанных секций, добавляя введение и заключение."""
+    def execute(self, task: dict, model_name: str, user_config: Dict) -> str:
+        """Принимает все части отчета и компилирует их в финальный документ."""
+        print(f"   [ReportWriterAgent] -> Компилирую финальный отчет на модели {model_name}...")
         profile = user_config.get("user_context", {}).get("profile", "Профиль не определен.")
-        prompt = f"**КОНТЕКСТ АУДИТОРИИ:** {profile}\n\n**ТВОЯ РОЛЬ:** Профессиональный копирайтер.\n**ТВОЯ ЗАДАЧА:** Превратить структурированные данные в связный Markdown-отчет, адаптированный под аудиторию. Вставляй маркеры цитирования `[CITE:claim_id]` после каждого утверждения.\n\n**ДАННЫЕ ОТ АНАЛИТИКА:**\n{json.dumps(analysis_data, ensure_ascii=False, indent=2)}"
-        report = invoke_llm_for_json_with_retry(self.llm_client, model_name, "gemini-2.5-flash-lite", prompt, FinalReport, self.budget_manager)
+        drafted_sections = task.get("drafted_sections", [])
+        report_title = task.get("report_title", "Аналитический отчет")
+
+        # Собираем все секции в один большой текст
+        full_draft = f"# {report_title}\n\n"
+        for i, section in enumerate(drafted_sections):
+            full_draft += f"## {i+1}. {section.get('section_title', '')}\n\n{section.get('markdown_content', '')}\n\n"
+
+        prompt = f"""
+**КОНТЕКСТ АУДИТОРИИ:** {profile}
+
+**ТВОЯ РОЛЬ:** Главный редактор.
+**ТВОЯ ЗАДАЧА:** Взять черновик отчета, состоящий из готовых секций, и довести его до совершенства.
+
+**ЧЕРНОВИК ОТЧЕТА:**
+---
+{full_draft}
+---
+
+**ИНСТРУКЦИИ:**
+1.  Напиши краткое, но емкое **Введение (Executive Summary)**, которое обобщает ключевые выводы всего документа.
+2.  Проверь стилистическую целостность текста.
+3.  Напиши сильное **Заключение**, которое подводит итоги и предлагает следующие шаги.
+4.  Собери все вместе (Введение + Текст секций + Заключение) в один финальный Markdown-документ.
+
+Верни только финальный `markdown_content`.
+"""
+        report = invoke_llm_for_json_with_retry(self.llm_client, model_name, "gemini-2.5-flash", prompt, FinalReport, self.budget_manager)
         return report.get('markdown_content', '')
+
+
+class ReviserAgent(BaseAgent):
+    """
+    Агент-критик, который оценивает полноту и релевантность собранной информации
+    в середине исследовательской фазы и корректирует курс.
+    """
+    def execute(self, task: dict, model_name: str, user_config: Dict) -> dict:
+        print(f"   [ReviserAgent] -> Задача '{task['task_id']}' на модели {model_name}...")
+        
+        # Извлекаем все необходимые данные из задачи, которую для нас сформировал orchestrator
+        main_goal = user_config.get("user_context", {}).get("main_goal", "Цель не определена.")
+        knowledge_base = task.get("knowledge_base", {})
+        remaining_tasks = task.get("remaining_tasks", [])
+
+        prompt = f"""
+**ТВОЯ РОЛЬ:** Ты - Ведущий Исследователь-Стратег и внутренний критик. Твоя задача - не выполнять поиск, а анализировать уже проделанную работу и корректировать дальнейший курс.
+
+**ГЛАВНАЯ ЦЕЛЬ ПРОЕКТА:**
+{main_goal}
+
+**УЖЕ СОБРАННЫЕ ФАКТЫ (ТЕКУЩАЯ БАЗА ЗНАНИЙ):**
+```json
+{json.dumps(knowledge_base, ensure_ascii=False, indent=2)}
+```
+
+**ЗАДАЧI, КОТОРЫЕ ЕЩЕ ОСТАЛОСЬ ВЫПОЛНИТЬ В ЭТОЙ ФАЗЕ:**
+{json.dumps(remaining_tasks, ensure_ascii=False, indent=2)}
+
+**ТВОЯ ЗАДАЧА - ПРОВЕСТИ РЕВИЗИЮ:**
+1.  **Оцени Достаточность:** Достаточно ли уже собранных фактов для ответа на главный вопрос проекта? Не ушли ли мы в сторону?
+2.  **Найди "Слепые Зоны":** Каких критически важных данных все еще не хватает? Есть ли в собранной информации предвзятость (например, только положительные отзывы)?
+3.  **Прими Решение:**
+    - Если информация полна и релевантна, установи `is_sufficient: true`.
+    - Если нужны доработки, установи `is_sufficient: false`, дай четкий `feedback` и предложи конкретные формулировки для новых задач в `new_task_suggestions`.
+
+Верни результат в виде JSON, соответствующего схеме `RevisionReport`.
+"""
+        report = invoke_llm_for_json_with_retry(self.llm_client, model_name, "gemini-2.5-flash", prompt, RevisionReport, self.budget_manager)
+        return report
+    
+class OutlineAgent(BaseAgent):
+    """Генерирует детальный план (оглавление) для финального отчета."""
+    def execute(self, task: dict, model_name: str, user_config: Dict) -> dict:
+        print(f"   [OutlineAgent] -> Задача '{task['task_id']}' на модели {model_name}...")
+        main_goal = user_config.get("user_context", {}).get("main_goal", "Цель не определена.")
+        knowledge_base = task.get("knowledge_base", {})
+
+        prompt = f"""
+**ГЛАВНАЯ ЦЕЛЬ ПРОЕКТА:** {main_goal}
+
+**ТВОЯ РОЛЬ:** Ведущий аналитик и редактор.
+**ТВОЯ ЗАДАЧА:** Создать детальный, логически выстроенный план (оглавление) для финального аналитического отчета.
+
+**ИНСТРУКЦИИ:**
+1.  Изучи главную цель и всю Базу Знаний.
+2.  Предложи броский, но профессиональный заголовок (`title`) для всего отчета.
+3.  Разбей отчет на логические секции (`sections`). Для каждой секции укажи `section_title` и `section_description` (краткое описание того, какие ключевые выводы и факты должны быть в этой секции). План должен включать введение, основную часть с анализом и заключение.
+
+**БАЗА ЗНАНИЙ ДЛЯ АНАЛИЗА:**
+```json
+{json.dumps(knowledge_base, ensure_ascii=False, indent=2)}
+```
+"""
+        outline = invoke_llm_for_json_with_retry(self.llm_client, model_name, "gemini-2.5-flash", prompt, ReportOutline, self.budget_manager)
+        return outline
+
+class SectionWriterAgent(BaseAgent):
+    """Пишет текст для одной конкретной секции отчета по заданному плану."""
+    def execute(self, task: dict, model_name: str, user_config: Dict) -> dict:
+        print(f"   [SectionWriterAgent] -> Задача '{task['task_id']}' на модели {model_name}...")
+        section_to_draft = task.get("section_to_draft", {})
+        knowledge_base = task.get("knowledge_base", {})
+
+        prompt = f"""
+**ТВОЯ РОЛЬ:** Эксперт-аналитик и копирайтер.
+**ТВОЯ ЗАДАЧА:** Написать текст для ОДНОЙ секции отчета, строго следуя плану.
+
+**ПЛАН СЕКЦИИ:**
+- **Название:** {section_to_draft.get('section_title')}
+- **Что раскрыть:** {section_to_draft.get('section_description')}
+
+**ИНСТРУКЦИИ:**
+1.  Используй информацию из Базы Знаний для написания текста.
+2.  После каждого утверждения, подкрепленного фактом из Базы Знаний, вставь маркер цитирования `[CITE:claim_id]`.
+3.  Не выходи за рамки плана для данной секции.
+4.  Верни только готовый текст в формате Markdown.
+
+**БАЗА ЗНАНИЙ ДЛЯ ИСПОЛЬЗОВАНИЯ:**
+```json
+{json.dumps(knowledge_base, ensure_ascii=False, indent=2)}
+```
+"""
+        section = invoke_llm_for_json_with_retry(self.llm_client, model_name, "gemini-2.5-flash-lite", prompt, ReportSection, self.budget_manager)
+        return section
+
