@@ -161,19 +161,16 @@ def reflection_node(state: GraphState, analyst: AnalystAgent, supervisor: Superv
     """Узел для анализа завершенной фазы и планирования следующей."""
     print("\n--- Узел: Reflection ---")
     
-    # 1. Выполняем анализ завершенной фазы
     analysis_result = analyst.execute_reflection(state['knowledge_base'], "gemini-2.5-flash")
     
     if not analysis_result or not analysis_result.get('data'):
         print("   [Reflection] !!! Анализ не дал результатов. Завершаю работу.")
-        state['task_queue'] = [] # Очищаем очередь, чтобы перейти к отчету
+        state['task_queue'] = []
         return state
 
-    # 2. Вызываем Supervisor для создания плана следующей фазы
     print("   [Reflection] -> Запрашиваю у Supervisor'а план следующей фазы...")
     next_phase_plan = supervisor.create_next_phase_plan(analysis_result['data'])
 
-    # 3. Добавляем новые задачи в очередь
     new_tasks = next_phase_plan.get('tasks', [])
     if new_tasks:
         print(f"   [Reflection] <- Получено {len(new_tasks)} новых задач. Добавляю в очередь.")
@@ -181,7 +178,6 @@ def reflection_node(state: GraphState, analyst: AnalystAgent, supervisor: Superv
         state['model_assignments'].update(next_phase_plan.get('initial_model_assignments', {}))
     else:
         print("   [Reflection] <- Supervisor не сгенерировал новых задач. План считается выполненным.")
-        # Очередь задач остается пустой, и роутер направит на финальный отчет
 
     return state
 
@@ -337,3 +333,26 @@ def build_graph(agents: dict, output_dir: str):
     app = workflow.compile()
     print("-> Финальный граф вычислений v4.1 успешно скомпилирован.")
     return app
+
+# ====================================================================================
+# === 4. ФУНКЦИЯ ЗАПУСКА ГРАФА =======================================================
+# ====================================================================================
+
+def run(app, initial_state: GraphState):
+    """
+    Запускает выполнение скомпилированного графа и выводит поток событий.
+    """
+    try:
+        for event in app.stream(initial_state, stream_mode="values"):
+            # `event` содержит полное состояние графа после каждого шага.
+            # Здесь мы можем видеть, какой узел только что отработал.
+            last_node = list(event.keys())[-1]
+            print(f"--- Завершился узел: {last_node} ---")
+            # Можно добавить более детальное логгирование состояния, если нужно
+            # import pprint
+            # pprint.pprint(event[last_node])
+        print("\n--- ВЫПОЛНЕНИЕ ГРАФА ЗАВЕРШЕНО ---")
+    except Exception as e:
+        print(f"\n!!! КРИТИЧЕСКАЯ ОШИБКА ВО ВРЕМЯ ВЫПОЛНЕНИЯ ГРАФА: {e}")
+        import traceback
+        traceback.print_exc()
