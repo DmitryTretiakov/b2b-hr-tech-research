@@ -6,20 +6,20 @@ from agents.workers import (
     ResearcherAgent, ContrarianAgent, QualityAssessorAgent, FixerAgent, 
     AnalystAgent, ReportWriterAgent, SanityCheckCritic,
     FinancialModelAgent, ProductManagerAgent, ReviserAgent,
-    OutlineAgent, SectionWriterAgent # <-- ДОБАВИТЬ
+    OutlineAgent, SectionWriterAgent
 )
-
 from agents.meta_agents import ArchitectAgent, KnowledgeJanitorAgent
 from utils.helpers import citation_post_processor
 import os
 import json
+import traceback
 
 # --- Константы для эскалации ---
 MAX_ESCALATIONS = 1
 MODEL_ESCALATION_PATH = {
     "gemma-3": "gemini-2.5-flash-lite",
     "gemini-2.5-flash-lite": "gemini-2.5-flash",
-    "gemini-2.5-flash": "gemini-2.5-flash" # Предел эскалации
+    "gemini-2.5-flash": "gemini-2.5-flash"
 }
 
 # ====================================================================================
@@ -61,8 +61,7 @@ def task_executor_node(state: GraphState, agents: dict) -> GraphState:
     agent_name = task['agent_name']
     agent = agents.get(agent_name)
     model = state['model_assignments'].get(task['task_id'])
-    user_config = state.get('user_config', {})
-
+    
     if not agent or not model:
         task['status'] = 'FAILURE'
         state['error_message'] = f"Агент {agent_name} или модель не найдены."
@@ -85,18 +84,16 @@ def task_executor_node(state: GraphState, agents: dict) -> GraphState:
             print(f"   [Executor] <- Артефакт '{task['task_id']}' успешно создан и сохранен.")
 
     except Exception as e:
-        # --- РАСШИРЕННОЕ ЛОГИРОВАНИЕ ---
         print("\n" + "="*80)
         print(f"!!! [Task Executor] ОШИБКА при выполнении задачи '{task.get('task_id')}' агентом '{agent_name}'.")
         print(f"    Тип ошибки: {type(e).__name__}")
         print(f"    Сообщение об ошибке: {e}")
-        import traceback
         print("    Трассировка стека:")
         traceback.print_exc()
         print("="*80 + "\n")
         
         task['status'] = 'FAILURE'
-        state['error_message'] = str(e) # Сохраняем сообщение для ArchitectAgent
+        state['error_message'] = str(e)
     
     state['completed_tasks'].append(task)
     state['current_task'] = None
@@ -172,11 +169,33 @@ def reflection_node(state: GraphState, analyst: AnalystAgent, supervisor: Superv
     return state
 
 def architect_node(state: GraphState, architect: ArchitectAgent) -> GraphState:
+    """
+    Узел для самокоррекции. Теперь он устанавливает статус для роутера.
+    """
     print("\n--- Узел: Architect ---")
-    task = state['current_task']
+    task_to_fix = state.get('current_task')
+    
+    # ИСПРАВЛЕНИЕ: Убираем "защиту", которая приводила к молчаливому провалу.
+    # Теперь мы доверяем, что escalation_router передал нам задачу.
+    if not task_to_fix:
+        print("!!! [ArchitectNode] КРИТИЧЕСКАЯ ОШИБКА: В узел Архитектора не была передана задача. Завершаю работу.")
+        state['error_message'] = "ArchitectNode received no task."
+        # Устанавливаем статус для нового роутера
+        state.setdefault('node_outputs', {})['architect_status'] = 'FATAL_ERROR'
+        return state
+
     error = state.get('error_message', 'Нет деталей')
-    remediated_task = architect.fix_or_enhance(task, error)
-    state['task_queue'].insert(0, remediated_task)
+    remediated_task = architect.fix_or_enhance(task_to_fix, error)
+    
+    # Если задача не изменилась, значит, архитектор не смог ее исправить.
+    if remediated_task == task_to_fix:
+        print("   [ArchitectNode] <- Архитектор не смог внести исправления. Сигнализирую о фатальной ошибке.")
+        state.setdefault('node_outputs', {})['architect_status'] = 'FATAL_ERROR'
+    else:
+        print(f"   [ArchitectNode] <- Задача {task_to_fix['task_id']} исправлена и возвращена в очередь.")
+        state['task_queue'].insert(0, remediated_task)
+        state.setdefault('node_outputs', {})['architect_status'] = 'REMEDIATED'
+
     state['escalation_count'] = 0
     state['current_task'] = None
     return state
@@ -252,110 +271,80 @@ def final_compile_node(state: GraphState, writer: ReportWriterAgent, output_dir:
 
 
 def revision_node(state: GraphState, reviser: ReviserAgent, supervisor: SupervisorAgent) -> GraphState:
-    """
-    Узел для критики собранной информации и, при необходимости,
-    создания новых, корректирующих задач.
-    """
     print("\n--- Узел: Revision ---")
-    
-    # Формируем задачу для ревизора
-    reviser_task = {
-        "task_id": "revision_01",
-        "description": "Провести ревизию текущего состояния исследования.",
-        "knowledge_base": state.get("knowledge_base", {}),
-        "remaining_tasks": state.get("task_queue", [])
-    }
-    
-    # Используем модель среднего уровня для анализа
-    revision_report = reviser.execute(reviser_task, "gemini-2.5-pro", state.get('user_config', {})) # Было: "gemini-2.5-flash"
-    
-    # Сохраняем отчет для маршрутизатора
+    reviser_task = {"task_id": "revision_01", "description": "Провести ревизию текущего состояния исследования.", "knowledge_base": state.get("knowledge_base", {}), "remaining_tasks": state.get("task_queue", [])}
+    revision_report = reviser.execute(reviser_task, "gemini-2.5-pro", state.get('user_config', {}))
     state.setdefault('node_outputs', {})['revision_report'] = revision_report
-    
     if not revision_report.get('is_sufficient') and revision_report.get('new_task_suggestions'):
         print("   [RevisionNode] -> Ревизор счел информацию недостаточной. Запрашиваю у Supervisor'а новые задачи...")
-        # Используем Supervisor'а для "допланирования" на основе фидбека
-        # (Это упрощенный вызов, в идеале Supervisor должен иметь отдельный метод для этого)
         feedback_prompt = f"Критик дал следующий фидбек: '{revision_report['feedback']}'. Сгенерируй план из следующих задач: {revision_report['new_task_suggestions']}"
-        new_plan = supervisor.create_initial_plan({"user_context": {"main_goal": feedback_prompt}}) # Упрощенная передача
-        
+        new_plan = supervisor.create_initial_plan({"user_context": {"main_goal": feedback_prompt}})
         if new_plan and new_plan.get('tasks'):
             print(f"   [RevisionNode] <- Получено {len(new_plan['tasks'])} новых корректирующих задач.")
             state['task_queue'].extend(new_plan['tasks'])
             state['model_assignments'].update(new_plan.get('initial_model_assignments', {}))
-
     return state
 
 # ====================================================================================
 # === 2. ОПРЕДЕЛЕНИЕ МАРШРУТИЗАТОРОВ (CONDITIONAL EDGES) =============================
 # ====================================================================================
 
-# ... (все маршрутизаторы остаются без изменений) ...
 def escalation_router(state: GraphState) -> str:
     """
     Маршрутизатор, реализующий логику Каскадной Эскалации.
     """
     print("\n--- Узел: Escalation Router ---")
-    
-    # ИСПРАВЛЕНИЕ: Сразу получаем задачу, с которой будем работать.
-    # Это предотвращает ошибки индекса и делает логику чище.
-    if not state['completed_tasks']:
-        # Крайний случай, если узел был вызван без выполненных задач
-        return "fetcher"
+    if not state['completed_tasks']: return "fetcher"
     last_completed_task = state['completed_tasks'][-1]
     task_id = last_completed_task['task_id']
 
-    # --- Ветка УСПЕХА ---
     if last_completed_task['status'] == 'SUCCESS':
-        print(f"   [EscalationRouter] Задача {task_id} успешна.")
         state['escalation_count'] = 0
-        
         is_research_task = not task_id.startswith('artifact_')
         remaining_research_tasks = any(not task['task_id'].startswith('artifact_') for task in state['task_queue'])
-
-        if remaining_research_tasks:
-            return "fetcher"
+        if remaining_research_tasks: return "fetcher"
         elif is_research_task and not remaining_research_tasks:
-            print("   [EscalationRouter] -> Фаза исследования завершена. Перехожу к Ревизии.")
             return "revision"
-        else:
-            # Если это была задача на артефакт или другая, и очередь пуста,
-            # пусть следующий роутер (artifact_router) решает, что делать.
-            return "fetcher"
+        else: return "fetcher"
 
-    # --- Ветка НЕУДАЧИ ---
     print(f"   [EscalationRouter] !!! Задача {task_id} провалена.")
     escalation_count = state.get('escalation_count', 0)
     
-    # ИСПРАВЛЕНИЕ: Явная подготовка к передаче Архитектору
     def escalate_to_architect(reason: str):
         print(f"   [EscalationRouter] !!! {reason}. Передаю Архитектору.")
-        # Явно берем проваленную задачу из 'completed' и кладем ее в 'current' для архитектора.
         failed_task = state['completed_tasks'].pop()
         state['current_task'] = failed_task
         return "architect"
 
-    # Проверяем лимит попыток
     if escalation_count >= MAX_ESCALATIONS:
         return escalate_to_architect(f"Лимит эскалаций ({MAX_ESCALATIONS}) исчерпан")
 
-    # Проверяем, можно ли повысить модель
     current_model = state['model_assignments'][task_id]
     next_model = MODEL_ESCALATION_PATH.get(current_model)
-
     if not next_model or next_model == current_model:
         return escalate_to_architect(f"Модель '{current_model}' на пределе эскалации")
 
-    # Если все проверки пройдены, эскалируем модель и возвращаем задачу в очередь
     print(f"   [EscalationRouter] -> Эскалирую задачу {task_id} на модель '{next_model}'.")
     state['escalation_count'] = escalation_count + 1
     state['model_assignments'][task_id] = next_model
-    
     failed_task = state['completed_tasks'].pop()
     failed_task['status'] = 'PENDING'
     state['task_queue'].insert(0, failed_task)
-    
     return "fetcher"
+
+# --- НОВЫЙ МАРШРУТИЗАТОР ДЛЯ "АВАРИЙНОГО ТОРМОЗА" ---
+def architect_router(state: GraphState) -> str:
+    """
+    Проверяет результат работы Архитектора.
+    """
+    print("\n--- Узел: Architect Router ---")
+    status = state.get('node_outputs', {}).get('architect_status', 'FATAL_ERROR')
+    if status == 'REMEDIATED':
+        print("   [ArchitectRouter] -> Задача исправлена. Возвращаюсь к исполнению.")
+        return "fetcher"
+    else:
+        print("   [ArchitectRouter] -> Архитектор не смог исправить задачу. АВАРИЙНОЕ ЗАВЕРШЕНИЕ.")
+        return END
 
 def qa_router(state: GraphState) -> str:
     """Маршрутизатор для конвейера QA."""
@@ -432,7 +421,6 @@ def section_writing_router(state: GraphState) -> str:
 # ====================================================================================
 
 def build_graph(agents: dict, output_dir: str):
-    """Собирает и компилирует финальный граф LangGraph."""
     workflow = StateGraph(GraphState)
 
     # 1. Регистрация всех узлов
@@ -458,46 +446,22 @@ def build_graph(agents: dict, output_dir: str):
     workflow.add_edge("supervisor", "task_fetcher")
     workflow.add_edge("task_fetcher", "task_executor")
 
-    # Основной цикл исследования
-    workflow.add_conditional_edges("task_executor", escalation_router, {
+    workflow.add_conditional_edges("task_executor", escalation_router, {"fetcher": "task_fetcher", "revision": "revision", "architect": "architect"})
+    workflow.add_conditional_edges("architect", architect_router, {
         "fetcher": "task_fetcher",
-        "revision": "revision",
-        "architect": "architect"
+        END: END
     })
-    workflow.add_edge("architect", "task_fetcher")
-
-    # Цикл критики и доработки
-    workflow.add_conditional_edges("revision", revision_router, {
-        "fetcher": "task_fetcher",
-        "qa": "qa"
-    })
-
-    # Конвейер QA
+    workflow.add_conditional_edges("revision", revision_router, {"fetcher": "task_fetcher", "qa": "qa"})
     workflow.add_conditional_edges("qa", qa_router, {"fixer": "fixer", "sanity_check": "sanity_check"})
     workflow.add_edge("fixer", "qa_reassessment")
     workflow.add_conditional_edges("qa_reassessment", reassessment_router, {"sanity_check": "sanity_check"})
     workflow.add_edge("sanity_check", "commit")
-    
-    # Роутер артефактов
-    workflow.add_conditional_edges("commit", artifact_router, {
-        "fetcher": "task_fetcher",
-        "janitor": "janitor"
-    })
-    
-    # Цикл рефлексии
+    workflow.add_conditional_edges("commit", artifact_router, {"fetcher": "task_fetcher", "janitor": "janitor"})
     workflow.add_edge("janitor", "reflection")
-    workflow.add_conditional_edges("reflection", reflection_router, {
-        "fetcher": "task_fetcher",
-        "final_report": "outline" # Переход к созданию отчета
-    })
-
-    # Конвейер написания отчета
+    workflow.add_conditional_edges("reflection", reflection_router, {"fetcher": "task_fetcher", "final_report": "outline"})
     workflow.add_edge("outline", "section_fetcher")
     workflow.add_edge("section_fetcher", "section_writer")
-    workflow.add_conditional_edges("section_writer", section_writing_router, {
-        "fetcher": "section_fetcher",
-        "compiler": "final_compiler"
-    })
+    workflow.add_conditional_edges("section_writer", section_writing_router, {"fetcher": "section_fetcher", "compiler": "final_compiler"})
     workflow.add_edge("final_compiler", END)
 
     return workflow.compile()
@@ -507,27 +471,18 @@ def build_graph(agents: dict, output_dir: str):
 # ====================================================================================
 
 def run(app, initial_state: GraphState, state_file_path: str):
-    """
-    Запускает выполнение скомпилированного графа, сохраняя состояние после каждого шага.
-    """
     try:
         for event in app.stream(initial_state, stream_mode="values"):
-            # `event` содержит полное, актуальное состояние графа после каждого шага.
-            # Сохраняем это состояние в файл.
             try:
                 with open(state_file_path, "w", encoding="utf-8") as f:
                     json.dump(event, f, ensure_ascii=False, indent=2)
             except (IOError, TypeError) as e:
                 print(f"!!! [Orchestrator] ВНИМАНИЕ: Не удалось сохранить состояние. Ошибка: {e}")
-
         print("\n--- ВЫПОЛНЕНИЕ ГРАФА ЗАВЕРШЕНО ---")
-        # После успешного завершения можно удалить файл состояния, чтобы следующий запуск был чистым
         if os.path.exists(state_file_path):
             os.remove(state_file_path)
             print(f"   [Orchestrator] Файл состояния '{state_file_path}' удален после успешного завершения.")
-
     except Exception as e:
         print(f"\n!!! КРИТИЧЕСКАЯ ОШИБКА ВО ВРЕМЯ ВЫПОЛНЕНИЯ ГРАФА: {e}")
-        import traceback
         traceback.print_exc()
         print(f"   [Orchestrator] Промежуточное состояние сохранено в '{state_file_path}' для возобновления.")
