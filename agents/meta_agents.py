@@ -1,29 +1,47 @@
 # agents/meta_agents.py
+from __future__ import annotations
 import json
 from pydantic import BaseModel, Field
 from typing import Dict, List
+
+# Используем forward reference hints для циклических зависимостей типов
+if 'LLMClient' not in locals():
+    from core.llm_client import LLMClient
+if 'APIBudgetManager' not in locals():
+    from core.budget_manager import APIBudgetManager
+if 'ToolRegistry' not in locals():
+    from core.tool_registry import ToolRegistry
+
 from agents.base_agent import BaseAgent
 from utils.helpers import invoke_llm_for_json_with_retry
-from agents.models import JanitorReport
+from agents.models import JanitorReport, ArchitectDecision
 
-# Pydantic модель для валидации вывода ArchitectAgent
-class FixedTask(BaseModel):
-    task_id: str = Field(description="Оригинальный ID задачи.")
-    agent_name: str = Field(description="Имя агента-исполнителя.")
-    description: str = Field(description="Новое, исправленное и более четкое описание задачи.")
 
 class ArchitectAgent(BaseAgent):
     """
-    Мета-агент для самокоррекции системы. Вызывается при полной неудаче эскалации.
+    Мета-агент для самокоррекции системы. Диагностирует причину провала задачи
+    и либо исправляет ее описание, либо инициирует создание нового инструмента.
     Использует модель Уровня 4 (Pro).
     """
-    def fix_task(self, failed_task: dict, error_history: str) -> dict:
+    def __init__(self, llm_client: LLMClient, budget_manager: APIBudgetManager, tool_smith: 'ToolSmithAgent', tool_registry: ToolRegistry):
+        # Обновленный вызов super() для передачи tool_registry
+        super().__init__(llm_client, budget_manager, tool_registry)
+        self.tool_smith = tool_smith
+        print(f"-> Агент '{self.__class__.__name__}' инициализирован с доступом к ToolSmith.")
+
+    def fix_or_enhance(self, failed_task: dict, error_history: str) -> dict:
+        """
+        Анализирует провал и решает: исправить промпт или создать инструмент.
+        Возвращает задачу, которую нужно повторно поставить в очередь.
+        """
         model_name = "gemini-2.5-pro"
-        print(f"   [ArchitectAgent] -> Анализирую провал задачи {failed_task.get('task_id')}...")
+        print(f"   [ArchitectAgent] -> Диагностирую провал задачи {failed_task.get('task_id')}...")
         
+        available_tools = self.tool_registry.get_tools_for_prompt()
+
         prompt = f"""
-**ТВОЯ РОЛЬ:** Главный Архитектор AI-систем. Ты "системный отладчик".
-**ПРОБЛЕМА:** Задача ниже провалилась несколько раз, даже после эскалации моделей.
+**ТВОЯ РОЛЬ:** Главный Архитектор и Системный Интегратор AI-систем.
+**ПРОБЛЕМА:** Задача ниже провалилась, даже после эскалации моделей.
 
 **ПРОВАЛЕННАЯ ЗАДАЧА (JSON):**
 ```json
@@ -33,27 +51,61 @@ class ArchitectAgent(BaseAgent):
 **ИСТОРИЯ ОШИБОК:**
 {error_history}
 
-**ТВОЯ ЗАДАЧА:**
-1.  Проанализируй описание задачи и ошибки. Вероятная причина - неоднозначная или слишком широкая формулировка.
-2.  Перепиши поле `description` задачи. Сделай его **более конкретным, узким и однозначным**.
-3.  Не меняй `task_id` и `agent_name`.
-4.  Верни ПОЛНЫЙ, ИСПРАВЛЕННЫЙ объект задачи в формате JSON.
+**ДОСТУПНЫЕ ИНСТРУМЕНТЫ:**
+{available_tools}
+
+**ТВОЯ ГЛАВНАЯ ЗАДАЧА: ДИАГНОСТИРОВАТЬ И ИСПРАВИТЬ СИСТЕМУ.**
+Проанализируй задачу, ошибки и список доступных инструментов. Определи КОРНЕВУЮ ПРИЧИНУ провала.
+Затем выбери ОДНО из двух действий:
+
+1.  **`FIX_DESCRIPTION`**: Если задача сформулирована нечетко, двусмысленно или слишком широко, и ее можно выполнить с помощью **уже существующих** инструментов.
+2.  **`CREATE_TOOL`**: Если для выполнения задачи **очевидно не хватает** специфического инструмента (например, нужен доступ к API, которого нет, или возможность читать определенный формат файлов).
+
+**ФОРМАТ ВЫВОДА:**
+Верни JSON-объект, который ТОЧНО соответствует одной из двух схем:
+- `{{ "action": "FIX_DESCRIPTION", "data": {{ "new_description": "Новое, предельно конкретное описание задачи." }} }}`
+- `{{ "action": "CREATE_TOOL", "data": {{ "tool_name": "имя_инструмента_в_snake_case", "tool_description": "Четкое и однозначное описание того, что должен делать инструмент, для другого AI-разработчика." }} }}`
 """
-        fixed_task_data = invoke_llm_for_json_with_retry(
+        decision_data = invoke_llm_for_json_with_retry(
             self.llm_client, model_name, "gemini-2.5-flash", prompt,
-            FixedTask, self.budget_manager
+            ArchitectDecision, self.budget_manager
         )
 
-        if not fixed_task_data:
-            print(f"   [ArchitectAgent] !!! Не удалось сгенерировать исправление. Возвращаю оригинальную задачу.")
+        if not decision_data:
+            print(f"   [ArchitectAgent] !!! Не удалось принять решение. Возвращаю оригинальную задачу для повторной попытки.")
             return failed_task
+
+        action = decision_data.get("action")
+        data = decision_data.get("data")
+
+        if action == "FIX_DESCRIPTION":
+            print(f"   [ArchitectAgent] <- РЕШЕНИЕ: Исправить описание задачи.")
+            original_task = failed_task.copy()
+            original_task["description"] = data.get("new_description", original_task["description"])
+            return original_task
         
-        # Обновляем оригинальную задачу новыми данными
-        original_task = failed_task.copy()
-        original_task.update(fixed_task_data)
+        elif action == "CREATE_TOOL":
+            tool_name = data.get("tool_name")
+            tool_description = data.get("tool_description")
+            print(f"   [ArchitectAgent] <- РЕШЕНИЕ: Создать новый инструмент '{tool_name}'.")
+            
+            if not tool_name or not tool_description:
+                print(f"   [ArchitectAgent] !!! Недостаточно данных для создания инструмента. Возвращаю задачу.")
+                return failed_task
+
+            try:
+                # Шаг 1: Генерируем код инструмента
+                tool_code = self.tool_smith.create_tool(tool_description)
+                # Шаг 2: Регистрируем инструмент в системе
+                self.tool_registry.register_tool(tool_name, tool_code)
+                # Шаг 3: Возвращаем ОРИГИНАЛЬНУЮ задачу в очередь. Теперь ее можно будет выполнить с новым инструментом.
+                print(f"   [ArchitectAgent] Новый инструмент '{tool_name}' создан. Задача будет выполнена повторно.")
+                return failed_task
+            except Exception as e:
+                print(f"   [ArchitectAgent] !!! Процесс создания инструмента провалился: {e}. Возвращаю задачу.")
+                return failed_task
         
-        print(f"   [ArchitectAgent] <- План исправления для задачи {original_task['task_id']} сгенерирован.")
-        return original_task
+        return failed_task
 
 class KnowledgeJanitorAgent(BaseAgent):
     """
@@ -98,7 +150,7 @@ class KnowledgeJanitorAgent(BaseAgent):
         updated_kb = knowledge_base.copy()
         archived_count = 0
         for fact_id in report.get('archived_ids', []):
-            if fact_id in updated_kb and updated_kb[fact_id]['status'] == 'ACTIVE':
+            if fact_id in updated_kb and updated_kb[fact_id].get('status') == 'ACTIVE':
                 updated_kb[fact_id]['status'] = 'ARCHIVED'
                 archived_count += 1
         
@@ -107,7 +159,7 @@ class KnowledgeJanitorAgent(BaseAgent):
 
 class ToolSmithAgent(BaseAgent):
     """
-    Агент для генерации новых инструментов "на лету".
+    Агент для генерации Python-кода для новых инструментов.
     Использует модель Уровня 4 (Pro).
     """
     def create_tool(self, tool_description: str) -> str:
@@ -121,9 +173,9 @@ class ToolSmithAgent(BaseAgent):
 
 **СТРОГИЕ ТРЕБОВАНИЯ К КОДУ:**
 1.  **Самодостаточность:** Код должен содержать все необходимые импорты.
-2.  **Одна Функция:** Результатом должен быть код ОДНОЙ функции.
+2.  **Одна Функция:** Результатом должен быть код ОДНОЙ функции. Имя функции должно быть в snake_case и соответствовать будущему названию инструмента.
 3.  **Типизация:** Используй строгую типизацию Python (type hints).
-4.  **Документация:** Напиши подробный docstring, объясняющий, что делает функция, ее параметры и что она возвращает.
+4.  **Документация:** Напиши подробный docstring, объясняющий, что делает функция, ее параметры и что она возвращает. Это критически важно для других агентов.
 5.  **Обработка Ошибок:** Включи базовую обработку ошибок (`try...except`).
 6.  **Безопасность:** НЕ ИСПОЛЬЗУЙ `eval()`, `exec()` или `os.system()`.
 

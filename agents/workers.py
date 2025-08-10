@@ -2,49 +2,106 @@
 import json
 from datetime import datetime, timezone
 from agents.base_agent import BaseAgent
-from tools.web_search import perform_search
-from utils.helpers import format_search_results_for_llm, invoke_llm_for_json_with_retry
+from utils.helpers import invoke_llm_for_json_with_retry
 from agents.models import (
     FactExtractionReport, BatchQualityAssessmentReport, AnalystReport, 
     FinalReport, FinalAnalysisReport, SanityCheckReport
 )
 
 class BaseResearchAgent(BaseAgent):
-    """Общий базовый класс для Researcher и Contrarian."""
+    """
+    Общий базовый класс для Researcher и Contrarian, работающий по циклу ReAct.
+    """
     role_prompt: str = "Твоя роль: Ассистент-исследователь."
 
     def execute(self, task: dict, model_name: str) -> list:
-        print(f"   [{self.__class__.__name__}] -> Задача '{task['task_id']}' на модели {model_name}...")
-        prompt_queries = f"{self.role_prompt}\nТвоя задача: '{task['description']}'. Сгенерируй 3-4 точных поисковых запроса. Верни их как JSON-список строк."
-        response_queries = self.llm_client.invoke(model_name, prompt_queries)
-        try:
-            queries = json.loads(response_queries.content)
-        except:
-            queries = [task['description']]
+        """
+        Выполняет задачу, используя цикл ReAct для выбора и применения инструментов.
+        """
+        print(f"   [{self.__class__.__name__}] -> Задача '{task['task_id']}' (ReAct) на модели {model_name}...")
+        
+        if not self.tool_registry:
+            raise ValueError("ToolRegistry не был предоставлен этому агенту.")
 
-        search_results_text = ""
-        for q in queries:
-            results = perform_search(q)
-            search_results_text += format_search_results_for_llm(results) + "\n\n"
+        available_tools = self.tool_registry.get_tools_for_prompt()
+        initial_prompt = f"""{self.role_prompt}
+**ТВОЯ ЗАДАЧА:** '{task['description']}'
 
-        prompt_claims = f"{self.role_prompt}\nПроанализируй текст и извлеки 3-5 ключевых фактов. Заполни все поля, включая `claim_id`, `statement`, `source_link` и `source_quote`.\nТЕКСТ:\n{search_results_text}"
-        report = invoke_llm_for_json_with_retry(
-            self.llm_client, model_name, "gemini-2.5-flash", prompt_claims,
-            FactExtractionReport, self.budget_manager
-        )
+**ПРОЦЕСС РАБОТЫ (ReAct):**
+Ты работаешь в цикле "Мысль -> Действие -> Наблюдение".
+1.  **Мысль (Thought):** Проанализируй задачу и реши, какой инструмент использовать для сбора информации.
+2.  **Действие (Action):** Верни JSON-объект с вызовом инструмента.
+3.  **Наблюдение (Observation):** Система выполнит инструмент и вернет тебе результат.
 
-        if not report or 'extracted_facts' not in report:
+**СПИСОК ИНСТРУМЕНТОВ:**
+{available_tools}
+
+**ФОРМАТ ВЫВОДА ДЛЯ ДЕЙСТВИЯ:**
+Ты ДОЛЖЕН вернуть JSON-объект, содержащий один из двух ключей:
+- `"tool_to_use"`: если ты хочешь использовать инструмент.
+- `"finish"`: если ты собрал достаточно информации и готов извлечь финальные факты.
+
+Примеры:
+`{{ "tool_to_use": {{ "tool_name": "web_search", "args": {{ "query": "производительность Moodle в вузах" }} }} }}`
+`{{ "finish": {{ "reason": "Вся необходимая информация о проблемах производительности и их причинах собрана." }} }}`
+
+Начинай. Твоя первая мысль?
+"""
+        conversation_history = [initial_prompt]
+        max_turns = 5
+        
+        for i in range(max_turns):
+            print(f"      [ReAct] Итерация {i+1}/{max_turns}...")
+            full_prompt = "\n".join(conversation_history)
+            
+            # Используем дешевую модель для выбора инструментов
+            response = self.llm_client.invoke(model_name, full_prompt)
+            conversation_history.append(response.content)
+            
+            try:
+                # Ищем JSON в ответе модели
+                action_json_str = response.content[response.content.find('{'):response.content.rfind('}')+1]
+                action_data = json.loads(action_json_str)
+
+                if "tool_to_use" in action_data:
+                    tool_call = action_data["tool_to_use"]
+                    tool_name = tool_call.get("tool_name")
+                    tool_args = tool_call.get("args", {})
+                    
+                    tool_result = self.tool_registry.use_tool(tool_name, tool_args)
+                    observation = f"OBSERVATION:\n```\n{str(tool_result)[:3000]}\n```" # Обрезаем для экономии токенов
+                    conversation_history.append(observation)
+                    print(f"      [ReAct] Инструмент '{tool_name}' выполнен.")
+                elif "finish" in action_data:
+                    print("      [ReAct] Агент решил завершить сбор информации.")
+                    break
+                else:
+                    raise ValueError("Неверный формат JSON-действия от LLM.")
+            except (json.JSONDecodeError, ValueError, KeyError) as e:
+                print(f"      [ReAct] !!! Ошибка обработки ответа LLM: {e}. Прошу исправиться.")
+                conversation_history.append("OBSERVATION: Твой предыдущий ответ был неверного формата. Пожалуйста, верни JSON с ключом 'tool_to_use' или 'finish'.")
+
+        print("   [ReAct] -> Перехожу к финальному синтезу фактов...")
+        final_synthesis_prompt = f"{self.role_prompt}\nПроанализируй всю переписку и наблюдения ниже и извлеки из них 3-5 ключевых фактов. Заполни все поля, включая `claim_id`, `statement`, `source_link` и `source_quote`.\n\n**ИСТОРИЯ РАБОТЫ И НАБЛЮДЕНИЯ:**\n{''.join(conversation_history)}"
+        
+        # Для синтеза используем более мощную модель
+        synthesis_model = "gemini-2.5-flash"
+        report = invoke_llm_for_json_with_retry(self.llm_client, synthesis_model, "gemini-2.5-flash-lite", final_synthesis_prompt, FactExtractionReport, self.budget_manager)
+
+        if not report or 'extracted_facts' not in report: 
             return []
-
-        for fact in report['extracted_facts']:
+        
+        for fact in report['extracted_facts']: 
             fact['created_at'] = datetime.now(timezone.utc).isoformat()
+        
+        print(f"   [{self.__class__.__name__}] <- Задача '{task['task_id']}' выполнена. Извлечено {len(report['extracted_facts'])} фактов.")
         return report['extracted_facts']
 
 class ResearcherAgent(BaseResearchAgent):
-    role_prompt: str = "Твоя роль: Ассистент-исследователь. Цель — найти подтверждающие, основные факты."
+    role_prompt: str = "Твоя роль: Ассистент-исследователь. Твоя цель — найти подтверждающие, основные факты по задаче. Используй инструменты для сбора информации, затем заверши работу для извлечения фактов."
 
 class ContrarianAgent(BaseResearchAgent):
-    role_prompt: str = "Твоя роль: 'Адвокат Дьявола'. Цель — найти опровержения, критику, провальные кейсы."
+    role_prompt: str = "Твоя роль: 'Адвокат Дьявола'. Твоя цель — найти опровержения, критику и провальные кейсы по задаче. Используй инструменты для сбора информации, затем заверши работу для извлечения фактов."
 
 class QualityAssessorAgent(BaseAgent):
     """Оценивает качество фактов и возвращает отчет."""

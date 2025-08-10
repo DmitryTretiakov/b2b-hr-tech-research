@@ -59,6 +59,11 @@ class FinalReport(BaseModel):
     """Финальный отчет от ReportWriterAgent."""
     markdown_content: str = Field(description="Полностью готовый отчет в формате Markdown.")
 
+class ArchitectDecision(BaseModel):
+    """Модель для валидации решения ArchitectAgent."""
+    action: Literal['FIX_DESCRIPTION', 'CREATE_TOOL'] = Field(description="Выбранное действие: исправить описание или создать инструмент.")
+    data: Dict[str, str] = Field(description="Данные для выполнения действия. Для 'FIX_DESCRIPTION' содержит {'new_description': '...'}. Для 'CREATE_TOOL' содержит {'tool_name': '...', 'tool_description': '...'}.")
+
 # --- Модель для SupervisorAgent ---
 class GraphPlan(BaseModel):
     """Pydantic-модель для описания плана графа."""

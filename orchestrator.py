@@ -6,6 +6,7 @@ from agents.workers import ResearcherAgent, ContrarianAgent, QualityAssessorAgen
 from agents.meta_agents import ArchitectAgent, KnowledgeJanitorAgent
 from utils.helpers import citation_post_processor
 import os
+import json
 
 # --- Константы для эскалации ---
 MAX_ESCALATIONS = 1
@@ -19,6 +20,7 @@ MODEL_ESCALATION_PATH = {
 # === 1. ОПРЕДЕЛЕНИЕ УЗЛОВ ГРАФА (NODES) =============================================
 # ====================================================================================
 
+# ... (все узлы остаются без изменений) ...
 def supervisor_node(state: GraphState, supervisor: SupervisorAgent) -> GraphState:
     """Узел для генерации первоначального плана, если его еще нет."""
     print("\n--- Узел: Supervisor ---")
@@ -186,9 +188,11 @@ def architect_node(state: GraphState, architect: ArchitectAgent) -> GraphState:
     print("\n--- Узел: Architect ---")
     task = state['current_task']
     error = state.get('error_message', 'Нет деталей')
-    fixed_task = architect.fix_task(task, error)
+
+
+    remediated_task = architect.fix_or_enhance(task, error)
     
-    state['task_queue'].insert(0, fixed_task)
+    state['task_queue'].insert(0, remediated_task)
     state['escalation_count'] = 0
     state['current_task'] = None
     print(f"   [ArchitectNode] Задача {task['task_id']} исправлена и возвращена в очередь.")
@@ -211,6 +215,7 @@ def final_report_node(state: GraphState, analyst: AnalystAgent, writer: ReportWr
 # === 2. ОПРЕДЕЛЕНИЕ МАРШРУТИЗАТОРОВ (CONDITIONAL EDGES) =============================
 # ====================================================================================
 
+# ... (все маршрутизаторы остаются без изменений) ...
 def escalation_router(state: GraphState) -> str:
     """Маршрутизатор, реализующий логику Каскадной Эскалации."""
     print("\n--- Узел: Escalation Router ---")
@@ -338,21 +343,28 @@ def build_graph(agents: dict, output_dir: str):
 # === 4. ФУНКЦИЯ ЗАПУСКА ГРАФА =======================================================
 # ====================================================================================
 
-def run(app, initial_state: GraphState):
+def run(app, initial_state: GraphState, state_file_path: str):
     """
-    Запускает выполнение скомпилированного графа и выводит поток событий.
+    Запускает выполнение скомпилированного графа, сохраняя состояние после каждого шага.
     """
     try:
         for event in app.stream(initial_state, stream_mode="values"):
-            # `event` содержит полное состояние графа после каждого шага.
-            # Здесь мы можем видеть, какой узел только что отработал.
-            last_node = list(event.keys())[-1]
-            print(f"--- Завершился узел: {last_node} ---")
-            # Можно добавить более детальное логгирование состояния, если нужно
-            # import pprint
-            # pprint.pprint(event[last_node])
+            # `event` содержит полное, актуальное состояние графа после каждого шага.
+            # Сохраняем это состояние в файл.
+            try:
+                with open(state_file_path, "w", encoding="utf-8") as f:
+                    json.dump(event, f, ensure_ascii=False, indent=2)
+            except (IOError, TypeError) as e:
+                print(f"!!! [Orchestrator] ВНИМАНИЕ: Не удалось сохранить состояние. Ошибка: {e}")
+
         print("\n--- ВЫПОЛНЕНИЕ ГРАФА ЗАВЕРШЕНО ---")
+        # После успешного завершения можно удалить файл состояния, чтобы следующий запуск был чистым
+        if os.path.exists(state_file_path):
+            os.remove(state_file_path)
+            print(f"   [Orchestrator] Файл состояния '{state_file_path}' удален после успешного завершения.")
+
     except Exception as e:
         print(f"\n!!! КРИТИЧЕСКАЯ ОШИБКА ВО ВРЕМЯ ВЫПОЛНЕНИЯ ГРАФА: {e}")
         import traceback
         traceback.print_exc()
+        print(f"   [Orchestrator] Промежуточное состояние сохранено в '{state_file_path}' для возобновления.")
