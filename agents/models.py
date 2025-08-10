@@ -64,6 +64,25 @@ class ArchitectDecision(BaseModel):
     action: Literal['FIX_DESCRIPTION', 'CREATE_TOOL'] = Field(description="Выбранное действие: исправить описание или создать инструмент.")
     data: Dict[str, str] = Field(description="Данные для выполнения действия. Для 'FIX_DESCRIPTION' содержит {'new_description': '...'}. Для 'CREATE_TOOL' содержит {'tool_name': '...', 'tool_description': '...'}.")
 
+# --- Модели для Генерации Артефактов ---
+class FinancialModelArtifact(BaseModel):
+    """Структурированный артефакт для базовой финансовой модели."""
+    title: str = Field(description="Название финансовой модели, например, 'Прогноз юнит-экономики для MVP'.")
+    key_assumptions: List[str] = Field(description="Список ключевых допущений, на которых построена модель (например, 'Средний чек (ACV) = 300,000 руб/год').")
+    calculations_table_markdown: str = Field(description="Таблица с расчетами, отформатированная как Markdown. Должна включать основные метрики (LTV, CAC, OPEX, CAPEX).")
+    summary_conclusion: str = Field(description="Краткий вывод по результатам моделирования (например, 'Модель показывает положительную юнит-экономику на второй год при удержании клиента > 18 месяцев.').")
+
+class UserStory(BaseModel):
+    """Структура для одной User Story."""
+    role: str = Field(description="Роль пользователя, например, 'HR-директор'.")
+    action: str = Field(description="Действие, которое пользователь хочет совершить, например, 'видеть прогресс обучения сотрудников по ключевым компетенциям'.")
+    value: str = Field(description="Ценность, которую пользователь получает, например, 'чтобы принимать решения о кадровых перестановках'.")
+
+class UserStoryArtifact(BaseModel):
+    """Структурированный артефакт для набора User Stories, формирующих дорожную карту."""
+    epic_title: str = Field(description="Название верхнеуровневой задачи (эпика), например, 'Реализация MVP Карьерного Навигатора'.")
+    user_stories: List[UserStory] = Field(description="Список User Stories, детализирующих эпик.")
+
 # --- Модель для SupervisorAgent ---
 class GraphPlan(BaseModel):
     """Pydantic-модель для описания плана графа."""

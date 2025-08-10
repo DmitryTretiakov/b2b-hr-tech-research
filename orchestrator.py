@@ -2,7 +2,11 @@
 from langgraph.graph import StateGraph, END
 from core.state import GraphState
 from agents.supervisor import SupervisorAgent
-from agents.workers import ResearcherAgent, ContrarianAgent, QualityAssessorAgent, FixerAgent, AnalystAgent, ReportWriterAgent, SanityCheckCritic
+from agents.workers import (
+    ResearcherAgent, ContrarianAgent, QualityAssessorAgent, FixerAgent, 
+    AnalystAgent, ReportWriterAgent, SanityCheckCritic,
+    FinancialModelAgent, ProductManagerAgent
+)
 from agents.meta_agents import ArchitectAgent, KnowledgeJanitorAgent
 from utils.helpers import citation_post_processor
 import os
@@ -31,13 +35,17 @@ def supervisor_node(state: GraphState, supervisor: SupervisorAgent) -> GraphStat
     return state
 
 def task_executor_node(state: GraphState, agents: dict) -> GraphState:
+    """
+    Выполняет одну задачу. Для агентов-артефакторов внедряет Базу Знаний в задачу.
+    """
     print("\n--- Узел: Task Executor ---")
     task = state.get('current_task')
     if not task: return state
+    
     agent_name = task['agent_name']
     agent = agents.get(agent_name)
     model = state['model_assignments'].get(task['task_id'])
-    user_config = state.get('user_config', {}) # <-- Получаем контекст
+    user_config = state.get('user_config', {})
 
     if not agent or not model:
         task['status'] = 'FAILURE'
@@ -45,15 +53,27 @@ def task_executor_node(state: GraphState, agents: dict) -> GraphState:
         state['completed_tasks'].append(task)
         state['current_task'] = None
         return state
+    
+    # --- ИНЪЕКЦИЯ КОНТЕКСТА ДЛЯ АГЕНТОВ-АРТЕФАКТОРОВ ---
+    if agent_name in ["FinancialModelAgent", "ProductManagerAgent"]:
+        print(f"   [Executor] Внедряю полную Базу Знаний в задачу для {agent_name}...")
+        task["knowledge_base"] = state.get("knowledge_base", {})
+
     try:
-        # Передаем контекст в метод execute
         result = agent.execute(task, model, user_config)
         task['status'] = 'SUCCESS'
+        
         if agent_name in ["Researcher", "Contrarian"]:
             state['node_outputs']['accumulated_raw_facts'].extend(result)
+        # --- СОХРАНЕНИЕ АРТЕФАКТОВ ---
+        elif agent_name in ["FinancialModelAgent", "ProductManagerAgent"]:
+            state.setdefault('artifacts', {})[task['task_id']] = result
+            print(f"   [Executor] <- Артефакт '{task['task_id']}' успешно создан и сохранен.")
+
     except Exception as e:
         task['status'] = 'FAILURE'
         state['error_message'] = str(e)
+    
     state['completed_tasks'].append(task)
     state['current_task'] = None
     return state
@@ -220,6 +240,21 @@ def reflection_router(state: GraphState) -> str:
         return "fetcher"
     else:
         return "final_report"
+    
+def artifact_router(state: GraphState) -> str:
+    """
+    Маршрутизатор, который проверяет, есть ли в очереди задачи на создание артефактов.
+    """
+    print("\n--- Узел: Artifact Router ---")
+    # Ищем в оставшейся очереди задачи с префиксом 'artifact_'
+    has_artifact_tasks = any(task['task_id'].startswith('artifact_') for task in state['task_queue'])
+    
+    if has_artifact_tasks:
+        print("   [ArtifactRouter] -> Обнаружены задачи на создание артефактов. Возвращаюсь к исполнителю.")
+        return "fetcher"
+    else:
+        print("   [ArtifactRouter] -> Задачи на создание артефактов отсутствуют. Перехожу к очистке.")
+        return "janitor"
 
 # ====================================================================================
 # === 3. СБОРКА ГРАФА (WORKFLOW COMPILATION) =========================================
@@ -229,7 +264,7 @@ def build_graph(agents: dict, output_dir: str):
     """Собирает и компилирует финальный граф LangGraph."""
     workflow = StateGraph(GraphState)
 
-    # Добавление узлов
+    # Добавляем все узлы, включая новые
     workflow.add_node("supervisor", lambda state: supervisor_node(state, agents['Supervisor']))
     workflow.add_node("task_fetcher", task_fetcher_node)
     workflow.add_node("task_executor", lambda state: task_executor_node(state, agents))
@@ -243,18 +278,17 @@ def build_graph(agents: dict, output_dir: str):
     workflow.add_node("reflection", lambda state: reflection_node(state, agents['Analyst'], agents['Supervisor']))
     workflow.add_node("final_report", lambda state: final_report_node(state, agents['Analyst'], agents['ReportWriter'], output_dir))
 
-    # Определение логики графа
+    # --- ПЕРЕСТРОЙКА ЛОГИКИ ГРАФА ---
     workflow.set_entry_point("supervisor")
     workflow.add_edge("supervisor", "task_fetcher")
-
-    # Основной рабочий цикл с эскалацией
     workflow.add_edge("task_fetcher", "task_executor")
+    
+    # Основной цикл исследования и самокоррекции
     workflow.add_conditional_edges("task_executor", escalation_router, {
         "fetcher": "task_fetcher",
         "qa": "qa",
         "architect": "architect"
     })
-
     workflow.add_edge("architect", "task_fetcher")
 
     # Конвейер QA
@@ -263,8 +297,13 @@ def build_graph(agents: dict, output_dir: str):
     workflow.add_conditional_edges("qa_reassessment", reassessment_router, {"sanity_check": "sanity_check"})
     workflow.add_edge("sanity_check", "commit")
     
+    # --- НОВЫЙ УЗЕЛ В ЛОГИКЕ: ПОСЛЕ КОММИТА РЕШАЕМ, СОЗДАВАТЬ ЛИ АРТЕФАКТЫ ---
+    workflow.add_conditional_edges("commit", artifact_router, {
+        "fetcher": "task_fetcher", # Если есть задачи на артефакты, возвращаемся в цикл
+        "janitor": "janitor"       # Если нет, идем дальше по старой ветке
+    })
+    
     # Цикл завершения фазы и рефлексии
-    workflow.add_edge("commit", "janitor")
     workflow.add_edge("janitor", "reflection")
     workflow.add_conditional_edges("reflection", reflection_router, {
         "fetcher": "task_fetcher",
@@ -273,9 +312,7 @@ def build_graph(agents: dict, output_dir: str):
 
     workflow.add_edge("final_report", END)
 
-    app = workflow.compile()
-    print("-> Финальный граф вычислений v4.1 успешно скомпилирован.")
-    return app
+    return workflow.compile()
 
 # ====================================================================================
 # === 4. ФУНКЦИЯ ЗАПУСКА ГРАФА =======================================================

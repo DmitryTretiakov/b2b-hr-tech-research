@@ -25,19 +25,20 @@ class GraphState(TypedDict):
     Представляет полное состояние нашего графа.
     Передается между всеми узлами.
     """
-    # Контекст, загружаемый при старте и неизменный в ходе выполнения
+    # Контекст, загружаемый при старте
     user_config: Dict
 
     # Динамически изменяемые поля
     task_queue: List[Task]
     completed_tasks: List[Task]
     knowledge_base: Dict[str, KnowledgeUnit]
+    artifacts: Dict[str, Dict]  # <-- НОВОЕ ПОЛЕ ДЛЯ ХРАНЕНИЯ АРТЕФАКТОВ
     
     # Поля для управления эскалацией
     current_task: Optional[Task]
-    model_assignments: Dict[str, str]  # {'task_id_1': 'gemma-3'}
+    model_assignments: Dict[str, str]
     escalation_count: int
     
     # Поля для передачи результатов между узлами
     error_message: Optional[str]
-    node_outputs: Dict[str, List] # e.g., {'researcher': [...], 'fixer': [...]}
+    node_outputs: Dict[str, List]
