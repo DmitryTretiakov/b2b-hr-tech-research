@@ -27,12 +27,15 @@ class BaseResearchAgent(BaseAgent):
             raise ValueError("ToolRegistry не был предоставлен этому агенту.")
 
         main_goal = user_config.get("user_context", {}).get("main_goal", "Цель не определена.")
-        high_level_context = f"**КОНТЕКСТ ВСЕГО ПРОЕКТА:**\nТы работаешь над достижением следующей главной цели: '{main_goal}'. Твоя текущая задача - это один из шагов на пути к этой цели. Выполняй ее, держа в уме конечный результат.\n\n**УЖЕ ПОСЕЩЕННЫЕ URL (не используй их повторно):**\n{json.dumps(user_config.get('visited_urls', []), indent=2)}"
+        # ИСПРАВЛЕНИЕ: visited_urls берутся из корня состояния, а не из user_config
+        visited_urls_str = json.dumps(user_config.get('visited_urls', []), indent=2)
+        high_level_context = f"**КОНТЕКСТ ВСЕГО ПРОЕКТА:**\nТы работаешь над достижением следующей главной цели: '{main_goal}'. Твоя текущая задача - это один из шагов на пути к этой цели. Выполняй ее, держа в уме конечный результат.\n\n**УЖЕ ПОСЕЩЕННЫЕ URL (не используй их повторно):**\n{visited_urls_str}"
+
         available_tools = self.tool_registry.get_tools_for_prompt()
         initial_prompt = f"""{self.role_prompt}
 {high_level_context}
 
-**ТВОЯ ТЕКУЩАЯ ЗАДАЧА:** '{task['description']}'
+**ТВОЯ ТЕКУЩЯЯ ЗАДАЧА:** '{task['description']}'
 
 **ПРОЦЕСС РАБОТЫ (ReAct):**
 Ты работаешь в цикле "Мысль -> Действие -> Наблюдение".
@@ -63,10 +66,16 @@ class BaseResearchAgent(BaseAgent):
 
                 if "tool_to_use" in action_data:
                     tool_call = action_data["tool_to_use"]
-                    tool_result = self.tool_registry.use_tool(tool_call.get("tool_name"), tool_call.get("args", {}))
+                    tool_name = tool_call.get("tool_name")
+                    tool_args = tool_call.get("args", {})
+                    
+                    # ИСПРАВЛЕНИЕ: Передаем полный объект состояния (который пришел в user_config) в use_tool
+                    tool_result = self.tool_registry.use_tool(tool_name, tool_args, user_config)
                     observation = f"OBSERVATION:\n```\n{str(tool_result)[:3000]}\n```"
                     conversation_history.append(observation)
+                    print(f"      [ReAct] Инструмент '{tool_name}' выполнен.")
                 elif "finish" in action_data:
+                    print("      [ReAct] Агент решил завершить сбор информации.")
                     break
                 else: raise ValueError("Неверный формат JSON-действия.")
             except Exception as e:

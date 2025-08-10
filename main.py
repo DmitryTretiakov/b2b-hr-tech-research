@@ -10,9 +10,9 @@ from core.budget_manager import APIBudgetManager
 from core.tool_registry import ToolRegistry
 from agents.supervisor import SupervisorAgent
 from agents.workers import (
-    ResearcherAgent, ContrarianAgent, QualityAssessorAgent, FixerAgent, 
+    OutlineAgent, ResearcherAgent, ContrarianAgent, QualityAssessorAgent, FixerAgent, 
     AnalystAgent, ReportWriterAgent, SanityCheckCritic,
-    FinancialModelAgent, ProductManagerAgent
+    FinancialModelAgent, ProductManagerAgent, ReviserAgent, SectionWriterAgent
 )
 from agents.meta_agents import ArchitectAgent, KnowledgeJanitorAgent, ToolSmithAgent
 import orchestrator
@@ -39,7 +39,7 @@ def main():
         print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось загрузить 'config.yaml'. {e}")
         return
 
-    # 3. Инициализация базовых сервисов
+    # 3. Инициализация базовых сервисов и агентов
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
     
@@ -48,18 +48,19 @@ def main():
     llm_client = LLMClient(budget_manager)
     tool_registry = ToolRegistry(generated_tools_dir=os.path.join(output_dir, "generated_tools"))
     
-    # 4. Инициализация ВСЕХ агентов с внедрением зависимостей
     tool_smith = ToolSmithAgent(llm_client, budget_manager)
     architect = ArchitectAgent(llm_client, budget_manager, tool_smith, tool_registry)
-    
     agents = {
         "Supervisor": SupervisorAgent(llm_client, budget_manager, tool_registry),
+        "Reviser": ReviserAgent(llm_client, budget_manager),
         "Researcher": ResearcherAgent(llm_client, budget_manager, tool_registry),
         "Contrarian": ContrarianAgent(llm_client, budget_manager, tool_registry),
         "QualityAssessor": QualityAssessorAgent(llm_client, budget_manager),
         "Fixer": FixerAgent(llm_client, budget_manager),
         "SanityCheckCritic": SanityCheckCritic(llm_client, budget_manager),
         "Analyst": AnalystAgent(llm_client, budget_manager, tool_registry),
+        "OutlineAgent": OutlineAgent(llm_client, budget_manager),
+        "SectionWriterAgent": SectionWriterAgent(llm_client, budget_manager),
         "ReportWriter": ReportWriterAgent(llm_client, budget_manager),
         "Architect": architect,
         "Janitor": KnowledgeJanitorAgent(llm_client, budget_manager),
@@ -68,16 +69,16 @@ def main():
         "ProductManagerAgent": ProductManagerAgent(llm_client, budget_manager),
     }
     
-    # 5. Сборка графа
     app = orchestrator.build_graph(agents, output_dir)
-    
-    # 6. Определение состояния для запуска
+
+    # 4. Определение состояния для запуска
     state_file_path = os.path.join(output_dir, "graph_state.json")
     
     initial_state_template: GraphState = {
         "user_config": user_config, "task_queue": [], "completed_tasks": [], "knowledge_base": {},
         "artifacts": {}, "current_task": None, "model_assignments": {}, "escalation_count": 0,
-        "error_message": None, "node_outputs": {}
+        "error_message": None, "node_outputs": {}, "visited_urls": [], "report_outline": None,
+        "drafted_sections": [], "current_section_to_draft": None
     }
 
     if args.new_plan_keep_kb and os.path.exists(state_file_path):
@@ -86,6 +87,7 @@ def main():
             old_state = json.load(f)
         state_to_run = initial_state_template
         state_to_run["knowledge_base"] = old_state.get("knowledge_base", {})
+        state_to_run["visited_urls"] = old_state.get("visited_urls", []) # Переносим и URL
         print(f"   [Main] <- База Знаний ({len(state_to_run['knowledge_base'])} фактов) перенесена в новую сессию.")
     elif os.path.exists(state_file_path):
         print(f"   [Main] РЕЖИМ: Продолжение. Загружаю состояние из '{state_file_path}'...")
@@ -96,8 +98,8 @@ def main():
         print("   [Main] РЕЖИМ: Новый запуск. Создаю новую сессию с контекстом из 'config.yaml'.")
         state_to_run = initial_state_template
 
-    # 7. Запуск
-    print("\n--- ЗАПУСК ГРАФА ВЫЧИСЛЕНИЙ v4.2 ---")
+    # 5. Запуск
+    print("\n--- ЗАПУСК ГРАФА ВЫЧИСЛЕНИЙ v4.3 ---")
     orchestrator.run(app, state_to_run, state_file_path)
 
 if __name__ == "__main__":

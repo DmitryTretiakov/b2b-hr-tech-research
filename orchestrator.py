@@ -412,11 +412,12 @@ def build_graph(agents: dict, output_dir: str):
     """Собирает и компилирует финальный граф LangGraph."""
     workflow = StateGraph(GraphState)
 
-    # Добавляем все узлы, включая новые
+    # 1. Регистрация всех узлов
     workflow.add_node("supervisor", lambda state: supervisor_node(state, agents['Supervisor']))
     workflow.add_node("task_fetcher", task_fetcher_node)
     workflow.add_node("task_executor", lambda state: task_executor_node(state, agents))
     workflow.add_node("architect", lambda state: architect_node(state, agents['Architect']))
+    workflow.add_node("revision", lambda state: revision_node(state, agents['Reviser'], agents['Supervisor']))
     workflow.add_node("qa", lambda state: qa_node(state, agents['QualityAssessor']))
     workflow.add_node("fixer", lambda state: fixer_node(state, agents['Fixer']))
     workflow.add_node("qa_reassessment", lambda state: qa_node(state, agents['QualityAssessor']))
@@ -429,50 +430,52 @@ def build_graph(agents: dict, output_dir: str):
     workflow.add_node("section_writer", lambda state: section_writer_node(state, agents['SectionWriterAgent']))
     workflow.add_node("final_compiler", lambda state: final_compile_node(state, agents['ReportWriter'], output_dir))
 
-    workflow.add_node("revision", lambda state: revision_node(state, agents['Reviser'], agents['Supervisor']))
-
-    # --- ПЕРЕСТРОЙКА ЛОГИКИ ГРАФА ---
+    # 2. Построение логики графа
     workflow.set_entry_point("supervisor")
     workflow.add_edge("supervisor", "task_fetcher")
     workflow.add_edge("task_fetcher", "task_executor")
-    
-    # Основной цикл исследования и самокоррекции
-    workflow.add_conditional_edges("reflection", reflection_router, {
-        "fetcher": "task_fetcher",
-        "final_report": "outline" # <-- ИЗМЕНЕНИЕ: ведем на создание плана
-    })
 
+    # Основной цикл исследования
+    workflow.add_conditional_edges("task_executor", escalation_router, {
+        "fetcher": "task_fetcher",
+        "revision": "revision",
+        "architect": "architect"
+    })
     workflow.add_edge("architect", "task_fetcher")
 
-    # Конвейер QA
+    # Цикл критики и доработки
     workflow.add_conditional_edges("revision", revision_router, {
-        "fetcher": "task_fetcher", # Если нужны новые задачи
-        "qa": "qa"                 # Если все хорошо
+        "fetcher": "task_fetcher",
+        "qa": "qa"
     })
+
+    # Конвейер QA
+    workflow.add_conditional_edges("qa", qa_router, {"fixer": "fixer", "sanity_check": "sanity_check"})
     workflow.add_edge("fixer", "qa_reassessment")
     workflow.add_conditional_edges("qa_reassessment", reassessment_router, {"sanity_check": "sanity_check"})
     workflow.add_edge("sanity_check", "commit")
     
-    # --- НОВЫЙ УЗЕЛ В ЛОГИКЕ: ПОСЛЕ КОММИТА РЕШАЕМ, СОЗДАВАТЬ ЛИ АРТЕФАКТЫ ---
+    # Роутер артефактов
     workflow.add_conditional_edges("commit", artifact_router, {
-        "fetcher": "task_fetcher", # Если есть задачи на артефакты, возвращаемся в цикл
-        "janitor": "janitor"       # Если нет, идем дальше по старой ветке
+        "fetcher": "task_fetcher",
+        "janitor": "janitor"
     })
     
-    # Цикл завершения фазы и рефлексии
+    # Цикл рефлексии
     workflow.add_edge("janitor", "reflection")
     workflow.add_conditional_edges("reflection", reflection_router, {
         "fetcher": "task_fetcher",
-        "final_report": "final_report"
+        "final_report": "outline" # Переход к созданию отчета
     })
+
+    # Конвейер написания отчета
     workflow.add_edge("outline", "section_fetcher")
     workflow.add_edge("section_fetcher", "section_writer")
     workflow.add_conditional_edges("section_writer", section_writing_router, {
-        "fetcher": "section_fetcher", # Цикл
-        "compiler": "final_compiler"  # Выход из цикла
+        "fetcher": "section_fetcher",
+        "compiler": "final_compiler"
     })
     workflow.add_edge("final_compiler", END)
-
 
     return workflow.compile()
 
