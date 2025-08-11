@@ -24,9 +24,10 @@ API_LIMITS = {
 
 # --- ФУНКЦИИ-ПОМОЩНИКИ ---
 # Убираем ttl, чтобы данные всегда были свежими при ручном обновлении
-@st.cache_data
 def load_json_data(filepath: str) -> dict | None:
-    """Кэшированная функция для загрузки JSON-файла."""
+    """
+    Функция для загрузки JSON-файла. БЕЗ кэширования.
+    """
     if os.path.exists(filepath):
         try:
             with open(filepath, "r", encoding="utf-8") as f:
@@ -88,7 +89,7 @@ def generate_graphviz_dot(state_data: dict) -> str:
     return dot.source
 
 # --- ГЛАВНЫЙ ИНТЕРФЕЙС ---
-st.title("🤖 Панель Мониторинга: Фабрика Аналитики v4.5")
+st.title("🤖 Панель Мониторинга: Фабрика Аналитики v5.0 (Production Ready)")
 
 # Убираем автоматическое обновление, добавляем кнопку для ручного
 st.button("🔄 Обновить данные")

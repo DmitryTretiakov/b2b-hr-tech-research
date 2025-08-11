@@ -14,7 +14,7 @@ from agents.models import (
     CompetitorAnalysisArtifact, FactExtractionReport, BatchQualityAssessmentReport, AnalystReport, 
     FinalReport, FinalAnalysisReport, MemoArtifact, RevisionReport, RoadmapVisualizationArtifact, SanityCheckReport,
     FinancialModelArtifact, TechnologyDeepDiveArtifact, UserStoryArtifact,
-    ReportOutline, ReportSection
+    ReportOutline, ReportSection, FactExtractionReport
 )
 
 class ToolChoice(BaseModel):
@@ -25,56 +25,80 @@ class ToolChoice(BaseModel):
 
 class SingleStepToolAgent(BaseAgent):
     """
-    Простой и надежный агент, который выполняет ровно одно действие:
-    1. Выбирает лучший инструмент для задачи.
-    2. Выполняет его.
-    3. Осмысляет результат и создает качественный факт.
-    Идеально подходит для работы с менее мощными моделями.
+    Надежный двухшаговый агент:
+    1. Выбирает и выполняет инструмент для получения сырых данных.
+    2. Осмысляет сырые данные и преобразует их в структурированные факты.
     """
-    def execute(self, task: dict, model_name: str, state: dict) -> list:
+    def execute(self, task: dict, model_name: str, state: dict) -> List[Dict]:
         try:
             print(f"   [SingleStepToolAgent] -> Задача '{task['task_id']}' на модели {model_name}...")
             if not self.tool_registry:
                 raise ValueError("ToolRegistry не был предоставлен этому агенту.")
 
+            # === Шаг 1: Выбор и выполнение инструмента ===
             available_tools = self.tool_registry.get_tools_for_prompt()
-            
-            prompt = f"""
-**ТВОЯ РОЛЬ:** Ты - эффективный ассистент. Твоя цель - выбрать ОДИН наиболее подходящий инструмент для выполнения задачи.
-
-**ЗАДАЧА:**
-{task['description']}
-
-**СПИСОК ДОСТУПНЫХ ИНСТРУМЕНТОВ:**
-{available_tools}
-
-**ИНСТРУКЦИИ:**
-1. Проанализируй задачу.
-2. Выбери из списка ОДИН инструмент, который лучше всего подходит для ее решения.
-3. Сформируй необходимые аргументы для этого инструмента.
-4. Верни свой выбор в виде JSON-объекта.
-"""
-            
-            # Шаг 1: LLM выбирает инструмент
+            choice_prompt = f"Твоя роль: ассистент. Выбери ОДИН инструмент для задачи: {task['description']}\nИнструменты:\n{available_tools}"
             tool_choice_dict = invoke_llm_for_json_with_retry(
-                self.llm_client, model_name, "gemini-2.5-flash-lite", prompt, ToolChoice, self.budget_manager
+                self.llm_client, model_name, "gemini-2.5-flash-lite", choice_prompt, ToolChoice, self.budget_manager
             )
 
             if not tool_choice_dict:
                 print("      [SingleStepToolAgent] !!! Не удалось получить выбор инструмента от LLM.")
                 return []
 
-            print(f"      [SingleStepToolAgent] LLM выбрал инструмент: '{tool_choice_dict.get('tool_name')}' с мыслью: '{tool_choice_dict.get('thought')}'")
-
-            # Шаг 2: Выполняем выбранный инструмент
             tool_name = tool_choice_dict.get('tool_name')
             tool_args = tool_choice_dict.get('args', {})
-            
-            result = self.tool_registry.use_tool(tool_name, tool_args, state)
-            
-            print(f"      [SingleStepToolAgent] <- Возвращаю сырой результат от инструмента '{tool_name}'.")
-            return result
+            print(f"      [SingleStepToolAgent] LLM выбрал инструмент: '{tool_name}'")
+            raw_result = self.tool_registry.use_tool(tool_name, tool_args, state)
+            raw_result_str = json.dumps(raw_result, ensure_ascii=False, indent=2)
 
+            # --- ИЗМЕНЕНИЕ НАЧАТО: Восстановлен шаг осмысления данных ---
+            # === Шаг 2: Осмысление сырого результата и создание фактов ===
+            print("      [SingleStepToolAgent] -> Осмысляю результат для создания качественных фактов...")
+            fact_prompt = f"""
+Твоя роль: Аналитик данных. Проанализируй сырой результат вызова инструмента, который был выполнен для решения задачи.
+
+**ИСХОДНАЯ ЗАДАЧА:** {task['description']}
+**СЫРОЙ РЕЗУЛЬТАТ (JSON):**
+```json
+{raw_result_str}
+```
+
+**ТВОЯ ЗАДАЧА:**
+1.  Извлеки из сырого JSON все полезные, атомарные утверждения.
+2.  Для КАЖДОГО утверждения создай отдельный факт в формате `KnowledgeUnit`.
+3.  `claim_id` должен быть уникальным и осмысленным (например, `tsu_main_page_title`).
+4.  `source_link` и `source_quote` должны точно соответствовать данным из сырого результата.
+5.  Верни результат в виде JSON-объекта, соответствующего схеме `FactExtractionReport`.
+"""
+            # Используем "строгую" модель для надежного извлечения JSON
+            fact_report = invoke_llm_for_json_with_retry(
+                self.llm_client,
+                "gemini-2.5-pro-strict", # Используем новую "строгую" модель
+                "gemini-2.5-flash",
+                fact_prompt,
+                FactExtractionReport, # Используем существующую модель
+                self.budget_manager
+            )
+
+            if not fact_report or 'extracted_facts' not in fact_report:
+                print("      [SingleStepToolAgent] !!! Не удалось извлечь факты из сырого результата.")
+                return []
+
+            # Дополняем факты метаданными
+            final_facts = []
+            for i, fact_data in enumerate(fact_report['extracted_facts']):
+                # Преобразуем Pydantic модель обратно в словарь, если необходимо
+                fact_dict = fact_data if isinstance(fact_data, dict) else fact_data.model_dump()
+                fact_dict['claim_id'] = f"{task['task_id']}_{i+1}" # Гарантируем уникальность ID
+                fact_dict['version'] = 1
+                fact_dict['created_at'] = datetime.now(timezone.utc).isoformat()
+                fact_dict['status'] = 'ACTIVE'
+                final_facts.append(fact_dict)
+
+            print(f"      [SingleStepToolAgent] <- Создано {len(final_facts)} фактов.")
+            return final_facts
+        
         except Exception as e:
             print("\n" + "="*80, file=sys.stderr)
             print(f"!!! КРИТИЧЕСКИЙ СБОЙ ВНУТРИ АГЕНТА '{self.__class__.__name__}'", file=sys.stderr)
@@ -84,6 +108,7 @@ class SingleStepToolAgent(BaseAgent):
             print("="*80 + "\n", file=sys.stderr)
             sys.stderr.flush()
             return []
+
 
 
 

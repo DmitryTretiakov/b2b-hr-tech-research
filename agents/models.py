@@ -26,6 +26,8 @@ class KnowledgeUnit(BaseModel):
     created_at: str = Field(description="Дата и время создания в формате ISO 8601.")
     status: Literal['ACTIVE', 'ARCHIVED'] = Field(default='ACTIVE', description="Статус факта.")
     source_link: str = Field(description="Прямая ссылка на источник.")
+    fix_attempts: int = Field(default=0, description="Счетчик попыток исправления этого факта.")
+
     source_quote: str = Field(description="Прямая цитата из источника, подтверждающая утверждение.")
 
 # --- Модели для Рабочих Агентов (Worker Agents) ---
@@ -36,6 +38,12 @@ class FactExtractionReport(BaseModel):
 class QualityAssessment(BaseModel):
     """Вердикт контролера качества по одному факту."""
     claim_id: str = Field(description="ID проверяемого факта.")
+    quality_score: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Вероятностная оценка качества факта от 0.0 (мусор) до 1.0 (идеально)."
+    )
     is_ok: bool = Field(description="True, если факт качественный и не требует доработки.")
     is_fixable: bool = Field(description="True, если факт имеет недостатки, но их можно исправить (серая зона).")
     reason: str = Field(description="Краткое объяснение, почему факт требует исправления или является браком.")
@@ -206,3 +214,4 @@ class GraphPlan(BaseModel):
     """Pydantic-модель для описания плана графа."""
     tasks: List[Task] = Field(description="Список всех задач с их зависимостями.")
     initial_model_assignments: Dict[str, str] = Field(description="Словарь {task_id: model_name} с начальным распределением моделей.")
+

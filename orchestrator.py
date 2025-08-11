@@ -168,12 +168,22 @@ def qa_node(state: GraphState, assessor: QualityAssessorAgent) -> GraphState:
     state['node_outputs']['good'], state['node_outputs']['fixable'] = good, fixable
     return state
 
-def fixer_node(state: GraphState, fixer: FixerAgent) -> GraphState:
+def fixer_node(state: GraphState, fixer: 'FixerAgent') -> GraphState:
+    """
+    Вызывает агента для исправления фактов и инкрементирует счетчик попыток.
+    """
     print("\n--- Узел: Fixer ---")
     facts_to_fix = state['node_outputs'].get('fixable', [])
     if not facts_to_fix:
         state['node_outputs']['fixed'] = []
         return state
+
+    # --- ИЗМЕНЕНИЕ НАЧАТО: Инкрементируем счетчик попыток перед исправлением ---
+    for fact in facts_to_fix:
+        fact['fix_attempts'] = fact.get('fix_attempts', 0) + 1
+    print(f"   [FixerNode] -> Отправлено на исправление {len(facts_to_fix)} фактов.")
+    # --- ИЗМЕНЕНИЕ ОКОНЧЕНО ---
+
     model = "gemma-3"
     fixed_facts = fixer.execute(facts_to_fix, model, state.get('user_config', {}))
     state['node_outputs']['fixed'] = fixed_facts
@@ -220,21 +230,26 @@ def reflection_node(state: GraphState, supervisor: SupervisorAgent) -> GraphStat
 
 def kb_ingestion_node(state: GraphState) -> GraphState:
     """
-    НОВЫЙ УЗЕЛ. Преобразует сырой результат из data_bus в кандидатов для БЗ.
+    Преобразует сырой результат из data_bus в кандидатов для БЗ.
     """
     print("\n--- Узел: KB Ingestion ---")
     last_task = state['completed_tasks'][-1]
     task_id = last_task['task_id']
     raw_result = state.get('data_bus', {}).get(task_id)
 
-    if not raw_result or not isinstance(raw_result, list):
-        print(f"   [IngestionNode] -> Нет данных для обработки от задачи {task_id}. Пропускаю.")
+        # Проверяем, что результат существует, является списком и не пустой
+    if not raw_result or not isinstance(raw_result, list) or not raw_result:
+        print(f"   [IngestionNode] -> Нет корректных данных для обработки от задачи {task_id}. Пропускаю.")
         state.setdefault('node_outputs', {})['facts_for_assessment'] = []
         return state
 
-    # Здесь можно добавить сложную логику валидации и преобразования.
-    # Пока что мы просто принимаем, что результат - это уже готовый список фактов.
-    # Это компромисс, чтобы не усложнять, но в будущем здесь может быть вызов LLM.
+    # Проверяем, что элементы списка - это словари (базовая проверка формата)
+    if not isinstance(raw_result[0], dict):
+        print(f"   [IngestionNode] !!! ВНИМАНИЕ: Данные от задачи {task_id} имеют неверный формат (ожидался список словарей). Пропускаю.")
+        state.setdefault('node_outputs', {})['facts_for_assessment'] = []
+        return state
+
+
     facts_to_assess = raw_result
     print(f"   [IngestionNode] -> Подготовлено {len(facts_to_assess)} фактов-кандидатов для QA.")
     state.setdefault('node_outputs', {})['facts_for_assessment'] = facts_to_assess
@@ -242,7 +257,7 @@ def kb_ingestion_node(state: GraphState) -> GraphState:
 
 def artifact_commit_node(state: GraphState) -> GraphState:
     """
-    НОВЫЙ УЗЕЛ. Перемещает готовый артефакт из data_bus в финальное хранилище.
+    Перемещает готовый артефакт из data_bus в финальное хранилище.
     """
     print("\n--- Узел: Artifact Commit ---")
     last_task = state['completed_tasks'][-1]
@@ -253,6 +268,7 @@ def artifact_commit_node(state: GraphState) -> GraphState:
         state.setdefault('artifacts', {})[task_id] = artifact_data
         print(f"   [ArtifactCommit] -> Артефакт '{task_id}' сохранен.")
     return state
+
 def commit_to_kb_node(state: GraphState) -> GraphState:
     """
     Фиксирует проверенные факты в Базе Знаний.
@@ -354,13 +370,13 @@ def architect_node(state: GraphState, architect: ArchitectAgent, validator: Vali
 def outline_node(state: GraphState, outline_agent: OutlineAgent) -> GraphState:
     """Узел для создания плана финального отчета."""
     print("\n--- Узел: Report Outline ---")
-    task = {
-        "task_id": "outline_generation",
-        "knowledge_base": state.get("knowledge_base", {})
-    }
-    outline = outline_agent.execute(task, "gemini-2.5-pro", state.get('user_config', {})) # Было: "gemini-2.5-flash"
+    # Проверяем, есть ли уже план, чтобы не создавать его повторно
+    if state.get('report_outline'):
+        return state
+    task = { "task_id": "outline_generation", "knowledge_base": state.get("knowledge_base", {}) }
+    outline = outline_agent.execute(task, "gemini-2.5-pro", state.get('user_config', {}))
     state['report_outline'] = outline
-    state['drafted_sections'] = [] # Инициализируем список для черновиков
+    state['drafted_sections'] = []
     return state
 
 def section_fetcher_node(state: GraphState) -> GraphState:
@@ -368,7 +384,6 @@ def section_fetcher_node(state: GraphState) -> GraphState:
     print("\n--- Узел: Section Fetcher ---")
     outline_sections = state.get('report_outline', {}).get('sections', [])
     num_drafted = len(state.get('drafted_sections', []))
-    
     if num_drafted < len(outline_sections):
         section_to_draft = outline_sections[num_drafted]
         state['current_section_to_draft'] = section_to_draft
@@ -456,7 +471,7 @@ def task_router(state: GraphState) -> str:
 
 def post_execution_router(state: GraphState) -> str:
     """
-    НОВЫЙ МАРШРУТИЗАТОР. Решает, что делать после выполнения задачи.
+    Маршрутизатор, который решает, что делать после выполнения задачи.
     """
     print("\n--- Узел: Post-Execution Router ---")
     last_task = state['completed_tasks'][-1]
@@ -465,10 +480,9 @@ def post_execution_router(state: GraphState) -> str:
         print(f"   [PostExecRouter] !!! Задача {last_task['task_id']} провалена. Передаю на анализ.")
         return "failure_analyst"
 
-    # Определяем тип задачи по имени агента (можно использовать и префиксы в task_id)
     agent_name = last_task['agent_name']
     is_research_task = agent_name in ["SingleStepToolAgent"]
-    is_artifact_task = agent_name in ["FinancialModelAgent", "ProductManagerAgent", "RoadmapVisualizationAgent"]
+    is_artifact_task = "Agent" in agent_name and agent_name not in ["SingleStepToolAgent", "ReviserAgent", "AnalystAgent"]
 
     if is_research_task:
         print("   [PostExecRouter] -> Исследовательская задача. Отправляю на обработку в KB.")
@@ -477,9 +491,8 @@ def post_execution_router(state: GraphState) -> str:
         print("   [PostExecRouter] -> Задача генерации артефакта. Сохраняю артефакт.")
         return "artifact_commit"
     else:
-        # Для всех остальных (аналитических, ревизионных и т.д.) просто берем следующую задачу
         print(f"   [PostExecRouter] -> Задача типа '{agent_name}'. Беру следующую задачу.")
-        return "task_router"
+        return "fetcher"
 
     
 def final_audit_router(state: GraphState) -> str:
@@ -506,28 +519,6 @@ def final_audit_router(state: GraphState) -> str:
             print("   [FinalAuditRouter] -> Аудит не пройден, но новых задач не предложено. Завершение работы во избежание цикла.")
             return END
 
-def post_execution_router(state: GraphState) -> str:
-    """
-    Маршрутизатор, который решает, что делать после выполнения задачи.
-    """
-    print("\n--- Узел: Post-Execution Router ---")
-    last_completed_task = state['completed_tasks'][-1]
-
-    if last_completed_task['status'] == 'SUCCESS':
-        print("   [PostExecRouter] -> Задача успешна. Проверяю, что делать дальше.")
-        state['escalation_count'] = 0
-        is_research_task = not last_completed_task['task_id'].startswith('artifact_')
-        remaining_research_tasks = any(not t['task_id'].startswith('artifact_') for t in state['task_queue'])
-        
-        if is_research_task and not remaining_research_tasks:
-            print("   [PostExecRouter] -> Последняя исследовательская задача выполнена. Перехожу к ревизии.")
-            return "revision"
-        
-        print("   [PostExecRouter] -> Исследование продолжается. Беру следующую задачу.")
-        return "fetcher"
-    else:
-        print(f"   [PostExecRouter] !!! Задача {last_completed_task['task_id']} провалена. Передаю на анализ.")
-        return "failure_analyst"
 
 def failure_router(state: GraphState) -> str:
     """
@@ -609,12 +600,51 @@ def architect_router(state: GraphState) -> str:
         return END
 
 def qa_router(state: GraphState) -> str:
-    """Маршрутизатор для конвейера QA."""
+    """
+    Интеллектуальный маршрутизатор для QA-конвейера.
+    Использует вероятностные оценки и счетчик попыток для принятия решений.
+    """
     print("\n--- Узел: QA Router ---")
-    if state['node_outputs'].get('fixable'):
-        return "fixer"
+    
+    # Получаем результаты последней оценки
+    assessments_report = state['node_outputs'].get('qa_report', {})
+    assessments = {item['claim_id']: item for item in assessments_report.get('assessments', [])}
+    
+    # Получаем факты, которые были на оценке
+    facts_under_review = state['node_outputs'].get('facts_for_assessment', [])
+    
+    good_facts = []
+    fixable_facts = []
+    
+    for fact in facts_under_review:
+        assessment = assessments.get(fact['claim_id'])
+        if not assessment:
+            continue
+
+        score = assessment.get('quality_score', 0.0)
+        attempts = fact.get('fix_attempts', 0)
+
+        if score >= 0.8:
+            print(f"   [QARouter] -> Факт '{fact['claim_id']}' прошел (оценка: {score:.2f}).")
+            good_facts.append(fact)
+        elif 0.25 <= score < 0.8 and attempts < 3:
+            print(f"   [QARouter] -> Факт '{fact['claim_id']}' требует доработки (оценка: {score:.2f}, попытка: {attempts+1}).")
+            fact['feedback'] = assessment.get('reason') # Добавляем фидбек для фиксера
+            fixable_facts.append(fact)
+        else:
+            print(f"   [QARouter] -> Факт '{fact['claim_id']}' отбракован (оценка: {score:.2f}, попыток: {attempts}).")
+
+    # Обновляем состояние для следующих узлов
+    # 'good' - это факты, которые прошли проверку и готовы к sanity_check
+    # 'fixable' - факты, которые отправятся в fixer
+    state['node_outputs']['good'] = good_facts
+    state['node_outputs']['fixable'] = fixable_facts
+
+    if fixable_facts:
+        return "fixer" # Если есть что исправлять, идем в fixer
     else:
-        state['node_outputs']['candidates_for_sanity_check'] = state['node_outputs'].get('good', [])
+        # Если исправлять нечего, все хорошие факты идут на финальную проверку
+        state['node_outputs']['candidates_for_sanity_check'] = good_facts
         return "sanity_check"
 
 def reassessment_router(state: GraphState) -> str:
@@ -671,26 +701,21 @@ def section_writing_router(state: GraphState) -> str:
 def build_graph(agents: dict, output_dir: str):
     workflow = StateGraph(GraphState)
 
-    # --- Регистрация узлов ---
+    # --- Регистрация всех узлов ---
     workflow.add_node("supervisor", lambda state: supervisor_node(state, agents['Supervisor']))
     workflow.add_node("task_fetcher", task_fetcher_node)
+    workflow.add_node("tool_validator", lambda state: tool_validator_node(state, agents['Validator']))
     workflow.add_node("task_executor", lambda state: task_executor_node(state, agents))
     workflow.add_node("kb_ingestion", kb_ingestion_node)
     workflow.add_node("artifact_commit", artifact_commit_node)
     workflow.add_node("commit_to_kb", commit_to_kb_node)
-
-    # Узлы QA
     workflow.add_node("qa", lambda state: qa_node(state, agents['QualityAssessor']))
     workflow.add_node("fixer", lambda state: fixer_node(state, agents['Fixer']))
     workflow.add_node("sanity_check", lambda state: sanity_check_node(state, agents['SanityCheckCritic']))
-
-    # Узлы обработки сбоев
     workflow.add_node("failure_analyst", lambda state: failure_analyst_node(state, agents['FailureAnalyst']))
     workflow.add_node("architect", lambda state: architect_node(state, agents['Architect'], agents['Validator']))
-    workflow.add_node("tool_validator", lambda state: tool_validator_node(state, agents['Validator']))
-
-    # Узлы генерации отчета
     workflow.add_node("outline", lambda state: outline_node(state, agents['OutlineAgent']))
+    workflow.add_node("section_fetcher", section_fetcher_node)
     workflow.add_node("section_writer", lambda state: section_writer_node(state, agents['SectionWriterAgent']))
     workflow.add_node("final_compiler", lambda state: final_compile_node(state, agents['ReportWriter'], output_dir))
 
@@ -698,95 +723,59 @@ def build_graph(agents: dict, output_dir: str):
     workflow.set_entry_point("supervisor")
     workflow.add_edge("supervisor", "task_fetcher")
 
-    # 1. Основной цикл: проверка наличия задач
+    # 1. Главный условный переход: есть ли задачи для выполнения?
     workflow.add_conditional_edges(
         "task_fetcher",
-        lambda s: "validator" if s.get("current_task") else "task_router",
-        {"validator": "tool_validator", "task_router": "task_router"}
+        lambda s: "tool_validator" if s.get("current_task") else "outline",
+        {
+            "tool_validator": "tool_validator", # Если есть задача, валидируем
+            "outline": "outline"               # Если нет, переходим к созданию отчета
+        }
     )
 
-    # 2. Валидация и выполнение задачи
-    workflow.add_conditional_edges("tool_validator", validation_router, {
-        "executor": "task_executor",
-        "architect": "architect"
+    # 2. Ветка выполнения задачи
+    workflow.add_conditional_edges("tool_validator", validation_router, { "executor": "task_executor", "architect": "architect" })
+    workflow.add_conditional_edges("task_executor", post_execution_router, {
+        "kb_ingestion": "kb_ingestion",
+        "artifact_commit": "artifact_commit",
+        "fetcher": "task_fetcher",
+        "failure_analyst": "failure_analyst"
     })
-    workflow.add_edge("task_executor", "post_execution_router")
 
-    # 3. Маршрутизация после выполнения
-    workflow.add_conditional_edges(
-        "post_execution_router",
-        lambda s: s['completed_tasks'][-1]['status'] if s.get('completed_tasks') else END,
-        {
-            "SUCCESS": "post_success_router", # Вложенный маршрутизатор для успеха
-            "FAILURE": "failure_analyst"
-        }
-    )
-    
-    # 3a. Вложенный маршрутизатор для успешных задач
-    workflow.add_conditional_edges(
-        "post_success_router",
-        lambda s: agents[s['completed_tasks'][-1]['agent_name']].__class__.__name__, # Определяем путь по имени агента
-        {
-            "SingleStepToolAgent": "kb_ingestion",
-            "FinancialModelAgent": "artifact_commit",
-            "ProductManagerAgent": "artifact_commit",
-            # ... другие агенты-артефакторы
-            "default": "task_router" # Для всех остальных - к следующей задаче
-        }
-    )
-
-    # 4. Ветки обработки результатов
+    # 3. Ветки обработки результатов и возвращение в основной цикл
     workflow.add_edge("kb_ingestion", "qa")
-    workflow.add_edge("artifact_commit", "task_router")
+    workflow.add_edge("artifact_commit", "task_fetcher") # После коммита артефакта - за новой задачей
 
-    # 5. Конвейер QA
-    workflow.add_conditional_edges("qa", qa_router, {
-        "fixer": "fixer",
-        "sanity_check": "sanity_check"
-    })
+    # 4. Конвейер QA и возвращение в основной цикл
+    workflow.add_conditional_edges("qa", qa_router, { "fixer": "fixer", "sanity_check": "sanity_check" })
     workflow.add_edge("fixer", "qa") # После исправления - снова на оценку
     workflow.add_edge("sanity_check", "commit_to_kb")
-    workflow.add_edge("commit_to_kb", "task_router") # После коммита - к следующей задаче
+    workflow.add_edge("commit_to_kb", "task_fetcher") # После коммита в БЗ - за новой задачей
 
-    # 6. Ветка обработки сбоев (без изменений)
-    workflow.add_conditional_edges("failure_analyst", failure_router, {
-        "fetcher": "task_fetcher",
-        "architect": "architect",
-        END: END
-    })
-    workflow.add_conditional_edges("architect", architect_router, {
-        "fetcher": "task_fetcher",
-        END: END
-    })
+    # 5. Ветка обработки сбоев и возвращение в основной цикл
+    workflow.add_conditional_edges("failure_analyst", failure_router, { "fetcher": "task_fetcher", "architect": "architect", END: END })
+    workflow.add_conditional_edges("architect", architect_router, { "fetcher": "task_fetcher", END: END })
 
-    # 7. Ветка генерации отчета (запускается из task_router, когда задачи кончились)
-    workflow.add_edge("outline", "task_router") # После создания плана - снова в роутер, который найдет задачи на написание секций
-    workflow.add_edge("section_writer", "task_router")
-    workflow.add_edge("final_compiler", END) # Конец
-
-    # 8. Финальный маршрутизатор
-    workflow.add_conditional_edges("task_router", task_router, {
-        "fetcher": "task_fetcher",
-        "outline": "outline",
-        END: END
+    # 6. Ветка генерации отчета (запускается, когда основная очередь задач пуста)
+    workflow.add_edge("outline", "section_fetcher")
+    workflow.add_conditional_edges("section_fetcher", section_writing_router, {
+        "section_writer": "section_writer",
+        "compiler": "final_compiler"
     })
+    workflow.add_edge("section_writer", "section_fetcher") # После написания секции - за следующей
+    workflow.add_edge("final_compiler", END)
 
     return workflow.compile()
 
-
-
 # ====================================================================================
-# === 4. ФУНКЦИЯ ЗАПУСКА ГРАФА =======================================================
+# === 4. ФУНКЦИЯ ЗАПУСКА ГРАФА (run) ================================================
 # ====================================================================================
-
 def run(app, initial_state: GraphState, state_file_path: str):
     try:
-        # Увеличиваем лимит рекурсии для сложных графов
         config = {"recursion_limit": 100}
         for event in app.stream(initial_state, config, stream_mode="values"):
             try:
                 with open(state_file_path, "w", encoding="utf-8") as f:
-                    # Используем default=str для сериализации объектов, которые не являются JSON-сериализуемыми
                     json.dump(event, f, ensure_ascii=False, indent=2, default=str)
             except (IOError, TypeError) as e:
                 print(f"!!! [Orchestrator] ВНИМАНИЕ: Не удалось сохранить состояние. Ошибка: {e}")

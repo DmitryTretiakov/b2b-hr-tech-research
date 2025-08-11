@@ -1,5 +1,6 @@
 # agents/meta_agents.py
 import json
+import time
 from agents.base_agent import BaseAgent
 from core.tool_registry import ToolRegistry
 from utils.helpers import invoke_llm_for_json_with_retry
@@ -73,7 +74,7 @@ class ToolSmithAgent(BaseAgent):
     """
     Агент, ответственный за динамическое создание новых инструментов.
     """
-    def generate_tool_code(self, tool_name: str, tool_description: str) -> str:
+    def generate_tool_code(self, tool_name: str, tool_description: str, model_name: str) -> str:
         """
         Генерирует Python-код для нового инструмента на основе его описания.
         """
@@ -138,35 +139,21 @@ def {tool_name}(query: str) -> dict:
 """
 
 
-        max_retries = 2
-        for attempt in range(max_retries):
-            print(f"      [ToolSmith] Попытка генерации кода {attempt + 1}/{max_retries}...")
-            
-            current_prompt = base_prompt
-            if attempt > 0:
-                current_prompt += f"\n\n**ВАЖНО:** Твой предыдущий код не прошел проверку синтаксиса. Ошибка: `{syntax_error}`. Пожалуйста, исправь код и верни только валидный Python-код."
+        response = self.llm_client.invoke(model_name, base_prompt) # Используем переданную модель
+        code = response.content if hasattr(response, 'content') else ""
+        
+        if code.startswith("```python"):
+            code = code[len("```python"):].strip()
+        if code.endswith("```"):
+            code = code[:-3].strip()
 
-            response = self.llm_client.invoke("gemini-2.5-pro", current_prompt)
-            code = response.content if hasattr(response, 'content') else ""
-            
-            # Очистка кода от Markdown
-            if code.startswith("```python"):
-                code = code[len("```python"):].strip()
-            if code.endswith("```"):
-                code = code[:-3].strip()
-
-            # Проверка синтаксиса
-            try:
-                compile(code, f"{tool_name}.py", "exec")
-                print("      [ToolSmith] <- Синтаксис кода успешно проверен.")
-                print("   [ToolSmithAgent] <- Генерация инструмента завершена.")
-                return code
-            except SyntaxError as e:
-                print(f"      [ToolSmith] !!! Ошибка синтаксиса в сгенерированном коде: {e}")
-                syntax_error = e # Сохраняем ошибку для следующей итерации
-
-        # Если все попытки провалились
-        raise Exception(f"Не удалось сгенерировать синтаксически корректный код для инструмента '{tool_name}' после {max_retries} попыток.")
+        try:
+            compile(code, f"{tool_name}.py", "exec")
+            print("      [ToolSmith] <- Синтаксис кода успешно проверен.")
+            return code
+        except SyntaxError as e:
+            print(f"      [ToolSmith] !!! Ошибка синтаксиса в сгенерированном коде: {e}")
+            raise e # Пробрасываем ошибку наверх, чтобы Architect мог ее поймать
     
 
 class ValidatorAgent(BaseAgent):
@@ -185,7 +172,7 @@ class ValidatorAgent(BaseAgent):
 
         available_tools = self.tool_registry.get_tools_for_prompt()
         prompt = f"""
-Твоя роль: Скрупулезный системный аналитик-планировщик. Твоя задача - предотвратить бессмысленную работу и упростить ее для исполнителей.
+Твоя роль: Скрупулезный системный аналитик-планировщик. Твоя задача - предотвратить бессмысленную работу, используя строгую логику.
 
 **ЗАДАЧА ДЛЯ АНАЛИЗА:**
 {task.get('description')}
@@ -193,11 +180,14 @@ class ValidatorAgent(BaseAgent):
 **ДОСТУПНЫЕ ИНСТРУМЕНТЫ:**
 {available_tools}
 
-**ИНСТРУКЦИИ:**
-1.  Внимательно прочитай описание задачи и сравни с возможностями инструментов.
-2.  **Сценарий 1: Задача НЕВЫПОЛНИМА.** Если для выполнения задачи очевидно не хватает инструмента (например, нужно прочитать файл, а инструмента нет), установи `is_executable: false` и **обязательно** заполни `missing_tool_description`.
-3.  **Сценарий 2: Задача ВЫПОЛНИМА.** Если задача выполнима с помощью имеющихся инструментов, установи `is_executable: true`.
-4.  **Критически важно для Сценария 2:** Если задача требует нескольких шагов (например, сначала поиск, а потом чтение каждой найденной страницы), ты **обязан** предоставить простой пошаговый план в поле `suggested_plan`. Например: ["Сначала используй web_search с запросом 'X'", "Затем для каждой релевантной ссылки вызови webpage_reader", "Проанализируй полученные тексты"]. Если задача простая и требует одного шага, оставь `suggested_plan` пустым.
+**ИНСТРУКЦИИ ПО АНАЛИЗУ (Chain-of-Thought):**
+1.  **Декомпозиция:** Разбей исходную задачу на простые, последовательные шаги.
+2.  **Сопоставление:** Для КАЖДОГО шага найди ОДИН наиболее подходящий инструмент из списка доступных.
+3.  **Вердикт:**
+    *   Если для **ВСЕХ** шагов нашлись инструменты, установи `is_executable: true`.
+    *   Если хотя бы для **ОДНОГО** шага инструмент не найден, установи `is_executable: false`.
+4.  **Обоснование (`reasoning`):** Кратко опиши свою цепочку рассуждений (декомпозиция и сопоставление).
+5.  **Описание недостающего инструмента (`missing_tool_description`):** Если `is_executable: false`, четко опиши, какой именно инструмент нужно создать для выполнения проваленного шага.
 
 Верни ТОЛЬКО JSON-объект, соответствующий схеме `ValidationReport`.
 """
@@ -224,41 +214,43 @@ class ArchitectAgent(BaseAgent):
 
     def fix_or_enhance(self, failed_task: dict, validation_report: dict | None, failure_feedback: str | None) -> dict:
         """
-        Пытается исправить проваленную задачу.
-        Приоритет: фидбек от FailureAnalyst, затем отчет от Validator.
+        Пытается исправить проваленную задачу путем создания нового инструмента.
+        Использует несколько попыток с разными моделями для надежности.
         """
         print(f"   [ArchitectAgent] -> Анализирую задачу '{failed_task.get('task_id')}'...")
 
-        tool_description = None
-        # Приоритет у фидбека от аналитика сбоев
-        if failure_feedback:
-            print("   [ArchitectAgent] Использую фидбек от FailureAnalyst для перегенерации инструмента.")
-            tool_description = failure_feedback # Предполагаем, что фидбек - это и есть описание для ToolSmith
-        elif validation_report and validation_report.get('missing_tool_description'):
-            tool_description = validation_report.get('missing_tool_description')
-        
+        tool_description = validation_report.get('missing_tool_description') if validation_report else failure_feedback
         if not tool_description:
-            print("   [ArchitectAgent] !!! Не удалось определить необходимый инструмент (отчет валидатора и фидбек отсутствуют).")
-            print("   [ArchitectAgent] <- Причина сбоя, вероятно, не в инструментах. Не могу исправить автоматически.")
             failed_task['status'] = 'FATAL_ERROR'
             return failed_task
-        
-        # Генерируем имя для инструмента из его описания
-        prompt_for_name = "Придумай короткое, но осмысленное имя в snake_case для инструмента, который делает следующее: '{}'. Верни только имя, например: 'search_and_read_webpage'.".format(tool_description)
+
+        # Генерируем имя для инструмента
+        prompt_for_name = f"Придумай короткое, но осмысленное имя в snake_case для инструмента, который делает следующее: '{tool_description}'. Верни только имя."
         response = self.llm_client.invoke("gemini-2.5-flash", prompt_for_name)
         tool_name = response.content.strip().replace("`", "")
 
         print(f"   [ArchitectAgent] <- РЕШЕНИЕ: Создать новый инструмент '{tool_name}'.")
-        try:
-            tool_code = self.toolsmith.generate_tool_code(tool_name, tool_description)
-            self.tool_registry.register_tool(tool_name, tool_code)
-            
-            failed_task['status'] = 'PENDING'
-            return failed_task
-        except Exception as e:
-            print(f"   [ArchitectAgent] !!! Процесс создания инструмента провалился: {e}. Сигнализирую о фатальной ошибке.")
-            failed_task['status'] = 'FATAL_ERROR'
-            return failed_task
+
+        # --- ИЗМЕНЕНИЕ НАЧАТО: Добавлен цикл попыток для генерации инструмента ---
+        max_attempts = 2
+        models_to_try = ["gemini-2.5-pro", "gemini-2.5-pro-creative"] # От стандартной к креативной
+
+        for i in range(max_attempts):
+            try:
+                model_for_attempt = models_to_try[i % len(models_to_try)]
+                print(f"      [Architect] Попытка генерации кода {i + 1}/{max_attempts} с моделью '{model_for_attempt}'...")
+                tool_code = self.toolsmith.generate_tool_code(tool_name, tool_description, model_for_attempt)
+                self.tool_registry.register_tool(tool_name, tool_code)
+                failed_task['status'] = 'PENDING' # Задача готова к повторному выполнению
+                return failed_task # Успех!
+            except Exception as e:
+                print(f"      [Architect] !!! Попытка {i + 1} провалена: {e}")
+                if i < max_attempts - 1:
+                    time.sleep(2) # Пауза перед следующей попыткой
+                else:
+                    print(f"   [ArchitectAgent] !!! Процесс создания инструмента окончательно провалился после {max_attempts} попыток. Сигнализирую о фатальной ошибке.")
+                    failed_task['status'] = 'FATAL_ERROR'
+                    return failed_task
         
     def conduct_final_audit(self, state: dict) -> dict:
         """

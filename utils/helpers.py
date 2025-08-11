@@ -98,28 +98,21 @@ def invoke_llm_for_json_with_retry(
         try:
             response = llm_client.invoke(current_model, current_prompt)
             raw_output = response.content
-            # === ИЗМЕНЕНИЕ НАЧАТО: Добавлена проверка на пустой ответ перед парсингом ===
-            if not raw_output:
-                print(f"      [JSON Invoker] !!! Получен пустой ответ от модели на попытке {attempt + 1}. Повторяю...")
-                time.sleep(2)
-                continue
-            # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
-
             parsed_object = parser.parse(raw_output)
             print("      [JSON Invoker] <- Ответ LLM успешно получен и распарсен.")
             return parsed_object.model_dump()
-        
-        except (ValidationError, json.JSONDecodeError) as e:
-            print(f"      [JSON Invoker] !!! Ошибка валидации/парсинга на попытке {attempt + 1}: {e}")
-            time.sleep(2)
-        # === ИЗМЕНЕНИЕ НАЧАТО: Восстановлен критически важный блок обработки ошибок API ===
+
+        # --- ИЗМЕНЕНИЕ НАЧАТО: Объединенная обработка ошибок для повышения надежности ---
+        except (ValidationError, json.JSONDecodeError, ValueError) as e:
+            # Ловим ошибки парсинга, JSON и пустых ответов (которые вызывают ValueError в LLMClient)
+            print(f"      [JSON Invoker] !!! Ошибка обработки на попытке {attempt + 1}: {e}")
+            time.sleep(2) # Пауза перед следующей попыткой
         except Exception as e:
-            print(f"      [JSON Invoker] !!! КРИТИЧЕСКАЯ ОШИБКА API или другая ошибка на попытке {attempt + 1}: {e}")
-            print(f"      [JSON Invoker] -> Произошла неустранимая ошибка. Прерываю попытки для этой задачи.")
-            # Прерываем цикл, чтобы функция вернула {} и обозначила неустранимый сбой.
-            # Это действие восстанавливает наблюдаемость системы.
-            break
-        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
+            # Ловим все остальные, более серьезные ошибки (например, проблемы с API)
+            print(f"      [JSON Invoker] !!! КРИТИЧЕСКАЯ ОШИБКА API на попытке {attempt + 1}: {e}")
+            print(f"      [JSON Invoker] -> Прерываю попытки для этой задачи.")
+            break # Прерываем цикл, чтобы обозначить неустранимый сбой
+        # --- ИЗМЕНЕНИЕ ОКОНЧЕНО ---
 
     print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось получить валидный JSON после {max_retries} попыток.")
     return {}
