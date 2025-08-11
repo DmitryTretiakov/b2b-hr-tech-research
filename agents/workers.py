@@ -11,9 +11,9 @@ from agents.base_agent import BaseAgent
 from core.context_compressor import ContextCompressor
 from utils.helpers import invoke_llm_for_json_with_retry
 from agents.models import (
-    FactExtractionReport, BatchQualityAssessmentReport, AnalystReport, 
-    FinalReport, FinalAnalysisReport, RevisionReport, SanityCheckReport,
-    FinancialModelArtifact, UserStoryArtifact,
+    CompetitorAnalysisArtifact, FactExtractionReport, BatchQualityAssessmentReport, AnalystReport, 
+    FinalReport, FinalAnalysisReport, MemoArtifact, RevisionReport, RoadmapVisualizationArtifact, SanityCheckReport,
+    FinancialModelArtifact, TechnologyDeepDiveArtifact, UserStoryArtifact,
     ReportOutline, ReportSection
 )
 
@@ -432,3 +432,57 @@ class SectionWriterAgent(BaseAgent):
         section = invoke_llm_for_json_with_retry(self.llm_client, "gemini-2.5-flash", "gemini-2.5-flash-lite", prompt, ReportSection, self.budget_manager)
         return section
 
+class ProductOwnerMemoAgent(BaseAgent):
+    def __init__(self, llm_client, budget_manager, context_compressor: ContextCompressor):
+        super().__init__(llm_client, budget_manager)
+        self.context_compressor = context_compressor
+
+    def execute(self, task: dict, model_name: str, user_config: Dict) -> dict:
+        knowledge_base = task.get("knowledge_base", {})
+        task_desc = f"Подготовить финальную аналитическую записку для Product Owner. {task['description']}"
+        compressed_kb = self.context_compressor.compress(knowledge_base, task_desc)
+        prompt = f"**ТВОЯ РОЛЬ:** Руководитель AI-продуктов / AI Product Owner.\n**ЗАДАЧА:** {task['description']}\n**ИНСТРУКЦИИ:** На основе сводки из Базы Знаний, напиши убедительную аналитическую записку. Сделай акцент на продуктовом видении, проблемах пользователей и предлагаемом решении.\n**СВОДКА ЗНАНИЙ:**\n{compressed_kb}"
+        return invoke_llm_for_json_with_retry(self.llm_client, "gemini-2.5-pro", "gemini-2.5-flash", prompt, MemoArtifact, self.budget_manager)
+
+class InvestmentMemoAgent(BaseAgent):
+    def __init__(self, llm_client, budget_manager, context_compressor: ContextCompressor):
+        super().__init__(llm_client, budget_manager)
+        self.context_compressor = context_compressor
+
+    def execute(self, task: dict, model_name: str, user_config: Dict) -> dict:
+        knowledge_base = task.get("knowledge_base", {})
+        task_desc = f"Подготовить инвестиционную записку для коммерческого директора. {task['description']}"
+        compressed_kb = self.context_compressor.compress(knowledge_base, task_desc)
+        prompt = f"**ТВОЯ РОЛЬ:** Инвестиционный аналитик.\n**ЗАДАЧА:** {task['description']}\n**ИНСТРУКЦИИ:** На основе сводки из Базы Знаний, напиши убедительную записку для инвестора. Сделай акцент на рыночных возможностях, финансовой модели, ROI и коммерческой жизнеспособности.\n**СВОДКА ЗНАНИЙ:**\n{compressed_kb}"
+        return invoke_llm_for_json_with_retry(self.llm_client, "gemini-2.5-pro", "gemini-2.5-flash", prompt, MemoArtifact, self.budget_manager)
+
+class CompetitorAnalysisAgent(BaseAgent):
+    def __init__(self, llm_client, budget_manager, context_compressor: ContextCompressor):
+        super().__init__(llm_client, budget_manager)
+        self.context_compressor = context_compressor
+
+    def execute(self, task: dict, model_name: str, user_config: Dict) -> dict:
+        knowledge_base = task.get("knowledge_base", {})
+        task_desc = f"Провести структурированный анализ конкурентов. {task['description']}"
+        compressed_kb = self.context_compressor.compress(knowledge_base, task_desc)
+        prompt = f"**ТВОЯ РОЛЬ:** Маркетинговый аналитик, специалист по конкурентной разведке.\n**ЗАДАЧА:** {task['description']}\n**ИНСТРУКЦИИ:** На основе сводки из Базы Знаний, проведи анализ 2-3 ключевых конкурентов. Для каждого определи сильные и слабые стороны. Сделай общий стратегический вывод.\n**СВОДКА ЗНАНИЙ:**\n{compressed_kb}"
+        return invoke_llm_for_json_with_retry(self.llm_client, "gemini-2.5-pro", "gemini-2.5-flash", prompt, CompetitorAnalysisArtifact, self.budget_manager)
+
+class TechnologyDeepDiveAgent(BaseAgent):
+    def __init__(self, llm_client, budget_manager, context_compressor: ContextCompressor):
+        super().__init__(llm_client, budget_manager)
+        self.context_compressor = context_compressor
+
+    def execute(self, task: dict, model_name: str, user_config: Dict) -> dict:
+        knowledge_base = task.get("knowledge_base", {})
+        task_desc = f"Провести глубокий технический анализ. {task['description']}"
+        compressed_kb = self.context_compressor.compress(knowledge_base, task_desc)
+        prompt = f"**ТВОЯ РОЛЬ:** Системный архитектор / Tech Lead.\n**ЗАДАЧА:** {task['description']}\n**ИНСТРУКЦИИ:** На основе сводки из Базы Знаний, проведи глубокий анализ указанных технологических аспектов. Оцени риски, возможности и дай конкретные технические рекомендации.\n**СВОДКА ЗНАНИЙ:**\n{compressed_kb}"
+        return invoke_llm_for_json_with_retry(self.llm_client, "gemini-2.5-pro", "gemini-2.5-flash", prompt, TechnologyDeepDiveArtifact, self.budget_manager)
+
+class RoadmapVisualizationAgent(BaseAgent):
+    def execute(self, task: dict, model_name: str, user_config: Dict) -> dict:
+        # Этот агент не нуждается в полном контексте, а только в артефакте с User Stories
+        user_story_artifact = task.get("user_story_artifact", {})
+        prompt = f"**ТВОЯ РОЛЬ:** Технический писатель / Визуализатор данных.\n**ЗАДАЧА:** {task['description']}\n**ИНСТРУКЦИИ:** Преобразуй предоставленный список User Stories в диаграмму Ганта, используя синтаксис Mermaid.js. Диаграмма должна отражать ключевые этапы (эпики) и задачи внутри них.\n**ДАННЫЕ (USER STORIES):**\n{json.dumps(user_story_artifact, ensure_ascii=False, indent=2)}"
+        return invoke_llm_for_json_with_retry(self.llm_client, "gemini-2.5-flash", "gemini-2.5-flash-lite", prompt, RoadmapVisualizationArtifact, self.budget_manager)

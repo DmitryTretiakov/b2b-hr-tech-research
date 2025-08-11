@@ -13,7 +13,7 @@ class ValidationReport(BaseModel):
     missing_tool_description: Optional[str] = Field(default=None, description="Если is_executable=false, здесь должно быть четкое описание того, какой инструмент необходимо создать.")
     # === ИЗМЕНЕНИЕ НАЧАТО: Добавлено поле для плана ===
     suggested_plan: Optional[List[str]] = Field(default=None, description="Если задача сложная, но выполнимая, здесь должен быть пошаговый план для исполнителя.")
-    
+
 # --- Модель для Базы Знаний ---
 class KnowledgeUnit(BaseModel):
     """
@@ -115,3 +115,45 @@ class ReportOutline(BaseModel):
 class ReportSection(BaseModel):
     """Структура для текста одной секции отчета."""
     markdown_content: str = Field(description="Полностью написанный текст для одной секции в формате Markdown.")
+
+
+# 1. Модель для ProductOwnerMemoAgent и InvestmentMemoAgent
+class MemoArtifact(BaseModel):
+    """Структурированный артефакт для аналитической или инвестиционной записки."""
+    title: str = Field(description="Главный заголовок документа.")
+    executive_summary: str = Field(description="Краткая выжимка (Executive Summary) на 2-3 абзаца, излагающая суть и ключевые выводы.")
+    markdown_content: str = Field(description="Основное тело записки в формате Markdown. Должно быть структурировано с подзаголовками.")
+    recommendation: str = Field(description="Четкая и однозначная рекомендация (например, 'Рекомендуется приступить к разработке MVP' или 'Рекомендуется провести дополнительное исследование рынка').")
+
+# 2. Модель для CompetitorAnalysisAgent
+class CompetitorProfile(BaseModel):
+    """Профиль одного конкурента."""
+    name: str = Field(description="Название компании-конкурента.")
+    strengths: List[str] = Field(description="Список из 2-3 ключевых сильных сторон.")
+    weaknesses: List[str] = Field(description="Список из 2-3 ключевых слабых сторон.")
+    business_model: str = Field(description="Краткое описание бизнес-модели (например, 'SaaS-подписка по tiered-модели').")
+
+class CompetitorAnalysisArtifact(BaseModel):
+    """Структурированный артефакт для анализа конкурентов."""
+    market_overview: str = Field(description="Краткий обзор рынка (1-2 абзаца).")
+    competitors: List[CompetitorProfile] = Field(description="Список профилей ключевых конкурентов.")
+    strategic_conclusion: str = Field(description="Стратегический вывод о положении нашей компании на фоне конкурентов.")
+
+# 3. Модель для TechnologyDeepDiveAgent
+class TechnologyAssessment(BaseModel):
+    """Оценка одного технологического аспекта."""
+    aspect: str = Field(description="Анализируемый аспект (например, 'Риски производительности Moodle').")
+    assessment: str = Field(description="Оценка аспекта, включая потенциальные риски и возможности (2-3 предложения).")
+    recommendation: str = Field(description="Конкретная рекомендация (например, 'Провести нагрузочное тестирование перед запуском' или 'Рассмотреть альтернативные LMS для B2B-сегмента').")
+
+class TechnologyDeepDiveArtifact(BaseModel):
+    """Структурированный артефакт для глубокого технического анализа."""
+    overall_summary: str = Field(description="Общий вывод о технологической готовности и ключевых рисках.")
+    assessments: List[TechnologyAssessment] = Field(description="Список оценок по конкретным техническим аспектам.")
+
+# 4. Модель для RoadmapVisualizationAgent
+class RoadmapVisualizationArtifact(BaseModel):
+    """Артефакт для визуализации дорожной карты."""
+    title: str = Field(description="Заголовок дорожной карты.")
+    mermaid_diagram: str = Field(description="Полностью готовая диаграмма в синтаксисе Mermaid.js, представляющая дорожную карту (например, диаграмма Ганта).")
+    commentary: str = Field(description="Краткий комментарий, объясняющий ключевые этапы на диаграмме.")

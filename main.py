@@ -19,10 +19,10 @@ from agents.meta_agents import ArchitectAgent, KnowledgeJanitorAgent, ToolSmithA
 
 from agents.supervisor import SupervisorAgent
 from agents.workers import (
-    ResearcherAgent, ContrarianAgent, QualityAssessorAgent, FixerAgent, 
-    AnalystAgent, ReportWriterAgent, SanityCheckCritic,
-    FinancialModelAgent, ProductManagerAgent, ReviserAgent,
-    OutlineAgent, SectionWriterAgent, SingleStepToolAgent
+    OutlineAgent, ReportWriterAgent, SanityCheckCritic, SectionWriterAgent, SingleStepToolAgent, QualityAssessorAgent, FixerAgent, 
+    AnalystAgent, ReviserAgent, FinancialModelAgent, ProductManagerAgent,
+    ProductOwnerMemoAgent, InvestmentMemoAgent, CompetitorAnalysisAgent,
+    TechnologyDeepDiveAgent, RoadmapVisualizationAgent
 )
 from tools.diagnostics import probe_google_api
 # --- Константы ---
@@ -111,42 +111,49 @@ def main():
     architect = ArchitectAgent(llm_client, budget_manager, tool_registry, toolsmith)
     
     agents = {
+        # Мета-агенты
         "Supervisor": SupervisorAgent(llm_client, budget_manager),
-        # === ИЗМЕНЕНИЕ НАЧАТО: Передача компрессора в аналитические агенты ===
+        "Architect": architect,
+        "Validator": validator,
+        "Janitor": KnowledgeJanitorAgent(llm_client, budget_manager),
+        
+        # Аналитические агенты
         "Reviser": ReviserAgent(llm_client, budget_manager, context_compressor),
         "Analyst": AnalystAgent(llm_client, budget_manager, context_compressor),
-        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
+        
+        # Агенты-исполнители
         "SingleStepToolAgent": SingleStepToolAgent(llm_client, budget_manager, tool_registry),
+        
+        # Агенты конвейера качества
         "QualityAssessor": QualityAssessorAgent(llm_client, budget_manager),
         "Fixer": FixerAgent(llm_client, budget_manager),
         "SanityCheckCritic": SanityCheckCritic(llm_client, budget_manager),
+
+        
         "OutlineAgent": OutlineAgent(llm_client, budget_manager),
         "SectionWriterAgent": SectionWriterAgent(llm_client, budget_manager),
         "ReportWriter": ReportWriterAgent(llm_client, budget_manager),
-        "Janitor": KnowledgeJanitorAgent(llm_client, budget_manager),
+
         "FinancialModelAgent": FinancialModelAgent(llm_client, budget_manager),
         "ProductManagerAgent": ProductManagerAgent(llm_client, budget_manager),
-        "Architect": architect,
-        "Validator": validator
+        
+        # Новые агенты-специалисты
+        "ProductOwnerMemoAgent": ProductOwnerMemoAgent(llm_client, budget_manager, context_compressor),
+        "InvestmentMemoAgent": InvestmentMemoAgent(llm_client, budget_manager, context_compressor),
+        "CompetitorAnalysisAgent": CompetitorAnalysisAgent(llm_client, budget_manager, context_compressor),
+        "TechnologyDeepDiveAgent": TechnologyDeepDiveAgent(llm_client, budget_manager, context_compressor),
+        "RoadmapVisualizationAgent": RoadmapVisualizationAgent(llm_client, budget_manager),
     }
+    print(f"-> Пул агентов инициализирован. Всего зарегистрировано: {len(agents)} агентов.")
 
-    # --- 3. Сборка графа и определение начального состояния ---
+   # --- 3. Сборка графа и определение начального состояния ---
     app = build_graph(agents, OUTPUT_DIR)
     initial_state = GraphState(
         user_config=user_config,
-        task_queue=[],
-        completed_tasks=[],
-        knowledge_base={},
-        artifacts={},
-        model_assignments={},
-        visited_urls=[],
-        escalation_count=0,
-        current_task=None,
-        error_message=None,
-        node_outputs={},
-        report_outline={},
-        drafted_sections=[],
-        current_section_to_draft=None
+        task_queue=[], completed_tasks=[], knowledge_base={}, artifacts={},
+        model_assignments={}, visited_urls=[], escalation_count=0,
+        current_task=None, error_message=None, node_outputs={},
+        report_outline={}, drafted_sections=[], current_section_to_draft=None
     )
 
     # --- 4. Логика возобновления / нового запуска ---
@@ -158,19 +165,18 @@ def main():
         print("   [Main] <- Состояние успешно загружено. Возобновляю работу.")
     else:
         if args.new_plan_keep_kb and os.path.exists(STATE_FILE):
-            print(f"   [Main] РЕЖИМ: Новый план с сохранением Базы Знаний. Загружаю KB из '{STATE_FILE}'...")
+            print(f"   [Main] РЕЖИМ: Новый план с сохранением Базы Знаний...")
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 saved_state = json.load(f)
             initial_state['knowledge_base'] = saved_state.get('knowledge_base', {})
             print("   [Main] <- База Знаний загружена. Генерирую новый план.")
         else:
-            print(f"   [Main] РЕЖИМ: Новый запуск. Создаю новую сессию с контекстом из '{CONFIG_FILE}'.")
-        # Удаляем старый файл состояния, если он есть, чтобы начать с чистого листа
+            print(f"   [Main] РЕЖИМ: Новый запуск с контекстом из '{CONFIG_FILE}'.")
         if os.path.exists(STATE_FILE):
             os.remove(STATE_FILE)
 
     # --- 5. Запуск графа ---
-    print("\n--- ЗАПУСК ГРАФА ВЫЧИСЛЕНИЙ v4.3 ---")
+    print("\n--- ЗАПУСК ГРАФА ВЫЧИСЛЕНИЙ v4.4 ---")
     run(app, initial_state, STATE_FILE)
 
 if __name__ == "__main__":
