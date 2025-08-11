@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from agents.base_agent import BaseAgent
 from utils.helpers import invoke_llm_for_json_with_retry
-from agents.models import GraphPlan
+from agents.models import GraphPlan, Task
 from typing import Dict
 import yaml
 
@@ -25,54 +25,28 @@ class SupervisorAgent(BaseAgent):
 
     def create_initial_plan(self, user_config: Dict) -> Dict:
         """
-        Создает первоначальный план, включая задачи на верификацию, исследование и создание артефактов.
+        Создает первоначальный план ТОЛЬКО для фазы сбора и анализа данных.
         """
         model_name = "gemini-2.5-pro"
         
-        # === ИЗМЕНЕНИЕ НАЧАТО: Упрощение промпта для повышения надежности ===
-        # Вместо передачи всего конфига, передаем только ключевые секции.
         context_summary = {
             "main_goal": user_config.get("user_context", {}).get("main_goal"),
             "product_vision": user_config.get("project_context", {}).get("product_vision"),
-            "initial_hypotheses": user_config.get("initial_hypotheses", {}).get("tsu_assets_analysis"),
-            "additional_tasks": user_config.get("initial_hypotheses", {}).get("additional_tasks")
+            "initial_hypotheses": user_config.get("initial_hypotheses", {})
         }
         context_str = yaml.dump(context_summary, allow_unicode=True, sort_keys=False, indent=2)
         
         agent_contract = """
-**УТВЕРЖДЕННЫЙ СПИСОК АГЕНТОВ-ИСПОЛНИТЕЛЕЙ (ТВОЙ ВЫБОР ОГРАНИЧЕН ТОЛЬКО ИМИ):**
-
-**Часть 1: Сбор и Анализ Данных**
-- **`SingleStepToolAgent`**: Выполняет простые задачи по сбору информации с помощью инструментов.
-- **`CompetitorAnalysisAgent`**: Проводит структурированный анализ конкурентов.
-- **`TechnologyDeepDiveAgent`**: Проводит глубокий анализ технических аспектов.
-
-**Часть 2: Создание Промежуточных Артефактов**
-- **`FinancialModelAgent`**: Создает артефакт с финансовой моделью.
-- **`ProductManagerAgent`**: Создает артефакт с User Stories и эпиками.
-- **`RoadmapVisualizationAgent`**: Визуализирует дорожную карту (использовать ПОСЛЕ `ProductManagerAgent`).
-
-**Часть 3: Стратегическое Планирование Финальных Документов**
-У тебя есть несколько мощных агентов для создания финальных отчетов. Твоя задача — не просто выбрать одного, а **спроектировать наилучшую стратегию** их использования, исходя из `main_goal`.
-
-**ТВОЙ ИНСТРУМЕНТАРИЙ ДЛЯ ОТЧЕТОВ:**
-- **Агенты для быстрых, сфокусированных записок:**
-  - `ProductOwnerMemoAgent`: Создает записку с акцентом на **продукт**.
-  - `InvestmentMemoAgent`: Создает записку с акцентом на **экономику и инвестиции**.
-- **Конвейер для глубоких, детализированных отчетов:**
-  - `OutlineAgent` -> `SectionWriterAgent` (несколько задач) -> `ReportWriterAgent`.
-
-**ПРИМЕРЫ СТРАТЕГИЙ (используй их как вдохновение, а не как жесткое правило):**
-
-- **Простая Стратегия (Быстрый Меморандум):** Если `main_goal` требует одного сфокусированного документа, создай **одну** задачу для `ProductOwnerMemoAgent` или `InvestmentMemoAgent`.
-
-- **Комплексная Стратегия (Детальный Отчет):** Если `main_goal` требует максимальной убедительности и детализации, спроектируй **полную цепочку** задач: сначала для `OutlineAgent`, затем несколько задач для `SectionWriterAgent` (по одной на каждую секцию из плана), и в конце одну задачу для `ReportWriterAgent`.
-
-- **Гибридная Стратегия (Отчет + Резюме):** Если требуется и детальный анализ, и краткая выжимка для руководства, ты можешь запланировать **сначала создание полного отчета (Комплексная Стратегия), а затем, как финальный шаг, поручить `InvestmentMemoAgent` написать `executive_summary` на основе уже готового отчета.**
+**УТВЕРЖДЕННЫЙ СПИСОК АГЕНТОВ ДЛЯ ФАЗЫ ИССЛЕДОВАНИЯ:**
+- **`SingleStepToolAgent`**: Для выполнения простых задач по сбору информации.
+- **`CompetitorAnalysisAgent`**: Для проведения структурированного анализа конкурентов.
+- **`TechnologyDeepDiveAgent`**: Для проведения глубокого анализа технических аспектов.
 """
 
         prompt = f"""
-**ТВОЯ РОЛЬ:** Ведущий Стратегический Архитектор. Твоя задача - создать полный и логичный план, гибко комбинируя утвержденных агентов для наилучшего результата.
+**ТВОЯ РОЛЬ:** Ведущий Стратегический Архитектор.
+**ТВОЯ ЗАДАЧА:** Проанализируй `main_goal` и `initial_hypotheses` и создай детальный план действий **ТОЛЬКО для первой фазы исследования: Сбор и Анализ Данных.**
+Не включай в план задачи по созданию артефактов или написанию отчета. Эти задачи будут спланированы позже.
 
 {agent_contract}
 
@@ -80,26 +54,16 @@ class SupervisorAgent(BaseAgent):
 ```yaml
 {context_str}```
 
-**ТВОЯ ЗАДАЧА:**
-Проанализируй `main_goal`. Спроектируй и создай полный план действий от сбора данных до создания финальных документов. Выбери или скомбинируй стратегии из Части 3, чтобы наилучшим образом соответствовать цели проекта.
-
-**ПРАВИЛА РЕСУРСОЭФФЕКТИВНОСТИ:**
+**ПРАВИЛА:**
+- Создай логическую последовательность задач, определив зависимости (`dependencies`). Задачи анализа должны зависеть от задач сбора данных.
 - Для задач `SingleStepToolAgent` назначь модель 'gemma-3'.
 - Для всех остальных агентов-специалистов назначь модель 'gemini-2.5-flash'.
-
-**ПРАВИЛА ПОСТРОЕНИЯ ЗАВИСИМОСТЕЙ (dependencies):**
-- Задача сбора данных (`data_collection_...`) не должна зависеть ни от чего.
-- Задача анализа (`analysis_...`) должна зависеть от всех релевантных задач сбора данных.
-- Задача создания артефакта (`artifact_...`) должна зависеть от всех релевантных задач анализа и сбора данных.
-- Задачи должны образовывать логическую последовательность.
-
 
 **ФОРМАТ ВЫВОДА:**
 Верни результат в виде ОДНОГО JSON-объекта, соответствующего схеме `GraphPlan`.
 """
-        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
 
-        print("   [SupervisorAgent] -> Генерирую контекстно-осознанный план графа...")
+        print("   [SupervisorAgent] -> Генерирую план для Фазы 1 (Исследование)...")
         plan_data = invoke_llm_for_json_with_retry(
             llm_client=self.llm_client,
             model_name=model_name,
@@ -109,15 +73,14 @@ class SupervisorAgent(BaseAgent):
             budget_manager=self.budget_manager
         )
         
-        # === ИЗМЕНЕНИЕ НАЧАТО: Добавлен финальный предохранитель ===
         if not plan_data or not plan_data.get('tasks'):
-            error_msg = "КРИТИЧЕСКАЯ ОШИБКА: SupervisorAgent не смог сгенерировать валидный план задач после всех попыток. Выполнение невозможно."
+            error_msg = "КРИТИЧЕСКАЯ ОШИБКА: SupervisorAgent не смог сгенерировать валидный план задач."
             print(f"   [SupervisorAgent] !!! {error_msg}")
             raise ValueError(error_msg)
-        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
             
-        print("   [SupervisorAgent] <- План графа успешно сгенерирован.")
+        print("   [SupervisorAgent] <- План Фазы 1 успешно сгенерирован.")
         return plan_data
+
 
 
     def create_next_phase_plan(self, analysis_summary: dict) -> Dict:
@@ -152,3 +115,56 @@ class SupervisorAgent(BaseAgent):
             
         print(f"   [SupervisorAgent] <- План следующей фазы сгенерирован ({len(plan_data.get('tasks', []))} задач).")
         return plan_data
+    
+    def create_artifact_and_report_plan(self, state: dict) -> Dict:
+        """
+        На основе наполненной Базы Знаний создает план для генерации артефактов и отчета.
+        """
+        model_name = "gemini-2.5-pro"
+        
+        context = {
+            "main_goal": state.get("user_config", {}).get("user_context", {}).get("main_goal"),
+            "knowledge_base_size": len(state.get("knowledge_base", {})),
+        }
+        context_str = json.dumps(context, indent=2, ensure_ascii=False)
+
+        agent_contract = """
+**УТВЕРЖДЕННЫЙ СПИСОК АГЕНТОВ ДЛЯ ФАЗЫ ГЕНЕРАЦИИ:**
+- **`FinancialModelAgent`**: Создает артефакт с финансовой моделью.
+- **`ProductManagerAgent`**: Создает артефакт с User Stories.
+- **`RoadmapVisualizationAgent`**: Визуализирует дорожную карту.
+- **`OutlineAgent`**: Создает план финального отчета.
+- **`SectionWriterAgent`**: Пишет одну секцию отчета.
+- **`ReportWriterAgent`**: Компилирует финальный отчет.
+"""
+        prompt = f"""
+**ТВОЯ РОЛЬ:** Ведущий Стратегический Архитектор.
+**КОНТЕКСТ:** Фаза исследования завершена, База Знаний наполнена.
+**ТВОЯ ЗАДАЧА:** Спланировать **финальную фазу: Создание Артефактов и Написание Отчета.**
+
+{agent_contract}
+
+**КЛЮЧЕВЫЕ ДАННЫЕ ПРОЕКТА:**
+```json
+{context_str}
+```
+
+**ПРАВИЛА:**
+- Проанализируй `main_goal` и создай задачи для генерации всех необходимых артефактов.
+- Создай полную цепочку задач для написания отчета: одна задача для `OutlineAgent`, затем несколько для `SectionWriterAgent` (по одной на каждую предполагаемую секцию), и одна финальная для `ReportWriterAgent`.
+- Установи правильные зависимости (`dependencies`). Например, `RoadmapVisualizationAgent` должен зависеть от `ProductManagerAgent`. Задачи `SectionWriterAgent` должны зависеть от `OutlineAgent`.
+- Для всех агентов назначь модель 'gemini-2.5-flash', кроме `ReportWriterAgent` (для него 'gemini-2.5-pro').
+
+**ФОРМАТ ВЫВОДА:**
+Верни результат в виде ОДНОГО JSON-объекта, соответствующего схеме `GraphPlan`.
+"""
+        print("   [SupervisorAgent] -> Генерирую план для Фазы 2 (Артефакты и Отчет)...")
+        plan_data = invoke_llm_for_json_with_retry(
+            self.llm_client, model_name, "gemini-2.5-flash", prompt, GraphPlan, self.budget_manager
+        )
+        if not plan_data:
+            return {"tasks": [], "initial_model_assignments": {}}
+            
+        print(f"   [SupervisorAgent] <- План Фазы 2 сгенерирован ({len(plan_data.get('tasks', []))} задач).")
+        return plan_data
+

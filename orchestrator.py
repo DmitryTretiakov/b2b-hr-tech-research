@@ -173,19 +173,20 @@ def janitor_node(state: GraphState, janitor: KnowledgeJanitorAgent) -> GraphStat
     state['knowledge_base'] = janitor.cleanup_knowledge_base(state['knowledge_base'])
     return state
 
-def reflection_node(state: GraphState, analyst: AnalystAgent, supervisor: SupervisorAgent) -> GraphState:
+def reflection_node(state: GraphState, supervisor: SupervisorAgent) -> GraphState:
     print("\n--- Узел: Reflection ---")
-    user_config = state.get('user_config', {})
-    analysis_result = analyst.execute_reflection(state['knowledge_base'], "gemini-2.5-flash", user_config)
-    if not analysis_result or not analysis_result.get('data'):
-        state['task_queue'] = []
-        return state
-    next_phase_plan = supervisor.create_next_phase_plan(analysis_result['data'])
+    # AnalystAgent больше не нужен на этом этапе, его роль выполняет Supervisor
+    
+    # Вызываем Supervisor для создания плана артефактов и отчета
+    next_phase_plan = supervisor.create_artifact_and_report_plan(state)
+    
     new_tasks = next_phase_plan.get('tasks', [])
     if new_tasks:
         state['task_queue'].extend(new_tasks)
         state['model_assignments'].update(next_phase_plan.get('initial_model_assignments', {}))
+        
     return state
+
 
 def failure_analyst_node(state: GraphState, failure_analyst: FailureAnalystAgent) -> GraphState:
     """
@@ -525,20 +526,6 @@ def reflection_router(state: GraphState) -> str:
     else:
         return "final_report"
     
-def artifact_router(state: GraphState) -> str:
-    """
-    Маршрутизатор, который проверяет, есть ли в очереди задачи на создание артефактов.
-    """
-    print("\n--- Узел: Artifact Router ---")
-    # Ищем в оставшейся очереди задачи с префиксом 'artifact_'
-    has_artifact_tasks = any(task['task_id'].startswith('artifact_') for task in state['task_queue'])
-    
-    if has_artifact_tasks:
-        print("   [ArtifactRouter] -> Обнаружены задачи на создание артефактов. Возвращаюсь к исполнителю.")
-        return "fetcher"
-    else:
-        print("   [ArtifactRouter] -> Задачи на создание артефактов отсутствуют. Перехожу к очистке.")
-        return "janitor"
     
 def revision_router(state: GraphState) -> str:
     """
@@ -577,6 +564,7 @@ def section_writing_router(state: GraphState) -> str:
 def build_graph(agents: dict, output_dir: str):
     workflow = StateGraph(GraphState)
 
+    # --- Регистрация всех узлов в графе ---
     workflow.add_node("supervisor", lambda state: supervisor_node(state, agents['Supervisor']))
     workflow.add_node("task_fetcher", task_fetcher_node)
     workflow.add_node("tool_validator", lambda state: tool_validator_node(state, agents['Validator']))
@@ -585,73 +573,99 @@ def build_graph(agents: dict, output_dir: str):
     workflow.add_node("architect", lambda state: architect_node(state, agents['Architect'], agents['Validator']))
     workflow.add_node("failure_analyst", lambda state: failure_analyst_node(state, agents['FailureAnalyst']))
     workflow.add_node("final_audit", lambda state: final_audit_node(state, agents['Architect']))
-
+    
+    # Узлы конвейера QA и наполнения Базы Знаний
     workflow.add_node("revision", lambda state: revision_node(state, agents['Reviser'], agents['Supervisor']))
     workflow.add_node("qa", lambda state: qa_node(state, agents['QualityAssessor']))
     workflow.add_node("fixer", lambda state: fixer_node(state, agents['Fixer']))
     workflow.add_node("qa_reassessment", lambda state: qa_node(state, agents['QualityAssessor']))
     workflow.add_node("sanity_check", lambda state: sanity_check_node(state, agents['SanityCheckCritic']))
     workflow.add_node("commit", commit_node)
+    
+    # Узлы для планирования и генерации отчета
     workflow.add_node("janitor", lambda state: janitor_node(state, agents['Janitor']))
-    workflow.add_node("reflection", lambda state: reflection_node(state, agents['Analyst'], agents['Supervisor']))
+    workflow.add_node("reflection", lambda state: reflection_node(state, agents['Supervisor']))
     workflow.add_node("outline", lambda state: outline_node(state, agents['OutlineAgent']))
     workflow.add_node("section_fetcher", section_fetcher_node)
     workflow.add_node("section_writer", lambda state: section_writer_node(state, agents['SectionWriterAgent']))
     workflow.add_node("final_compiler", lambda state: final_compile_node(state, agents['ReportWriter'], output_dir))
 
+    # --- Определение потока управления (ребер графа) ---
+    
+    # 1. Точка входа и основной цикл выполнения задач
     workflow.set_entry_point("supervisor")
     workflow.add_edge("supervisor", "task_fetcher")
-    
     workflow.add_conditional_edges(
         "task_fetcher",
         task_router,
-        {"tool_validator": "tool_validator", "final_audit": "final_audit"}
+        {
+            "tool_validator": "tool_validator",
+            "final_audit": "final_audit" # Выход из цикла, если задач нет
+        }
     )
-    
     workflow.add_conditional_edges("tool_validator", validation_router, {
         "executor": "task_executor",
-        "architect": "architect",
-        END: END
+        "architect": "prepare_for_architect" # Переход к подготовке для архитектора
     })
-    
+
+    # 2. Маршрутизация после выполнения задачи (успех или неудача)
     workflow.add_conditional_edges("task_executor", post_execution_router, {
         "fetcher": "task_fetcher",
         "revision": "revision",
         "failure_analyst": "failure_analyst"
     })
 
+    # 3. Ветка интеллектуальной обработки сбоев
     workflow.add_conditional_edges("failure_analyst", failure_router, {
         "fetcher": "task_fetcher",
         "prepare_for_architect": "prepare_for_architect",
         END: END
     })
-    
-    # Новый маршрут для самокоррекции
+
+    # 4. Ветка самокоррекции (создание/исправление инструментов)
     workflow.add_edge("prepare_for_architect", "architect")
-    # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
-    
     workflow.add_conditional_edges("architect", architect_router, {
         "fetcher": "task_fetcher",
         END: END
     })
 
-    workflow.add_conditional_edges("revision", revision_router, {"fetcher": "task_fetcher", "qa": "qa"})
-    workflow.add_conditional_edges("qa", qa_router, {"fixer": "fixer", "sanity_check": "sanity_check"})
+    # 5. Конвейер наполнения Базы Знаний (QA Pipeline)
+    workflow.add_conditional_edges("revision", revision_router, {
+        "fetcher": "task_fetcher", 
+        "qa": "qa"
+    })
+    workflow.add_conditional_edges("qa", qa_router, {
+        "fixer": "fixer", 
+        "sanity_check": "sanity_check"
+    })
     workflow.add_edge("fixer", "qa_reassessment")
-    workflow.add_conditional_edges("qa_reassessment", reassessment_router, {"sanity_check": "sanity_check"})
+    workflow.add_conditional_edges("qa_reassessment", reassessment_router, {
+        "sanity_check": "sanity_check"
+    })
     workflow.add_edge("sanity_check", "commit")
-    workflow.add_conditional_edges("commit", artifact_router, {"fetcher": "task_fetcher", "janitor": "janitor"})
-    workflow.add_edge("janitor", "reflection")
-    workflow.add_conditional_edges("reflection", reflection_router, {"fetcher": "task_fetcher", "final_report": "outline"})
+
+    # 6. Переход от Фазы 1 (Исследование) к Фазе 2 (Генерация)
+    workflow.add_edge("commit", "janitor") # Сначала чистим KB
+    workflow.add_edge("janitor", "reflection") # Затем на основе чистой KB планируем следующую фазу
+    workflow.add_conditional_edges("reflection", reflection_router, {
+        "fetcher": "task_fetcher", # Если Supervisor создал новые задачи
+        "outline": "outline"       # Если задач нет, переходим к созданию плана отчета
+    })
+
+    # 7. Конвейер написания отчета
     workflow.add_edge("outline", "section_fetcher")
     workflow.add_edge("section_fetcher", "section_writer")
-    workflow.add_conditional_edges("section_writer", section_writing_router, {"fetcher": "section_fetcher", "compiler": "final_compiler"})
+    workflow.add_conditional_edges("section_writer", section_writing_router, {
+        "fetcher": "section_fetcher", 
+        "compiler": "final_compiler"
+    })
+    workflow.add_edge("final_compiler", END)
+
+    # 8. Ветка финального аудита
     workflow.add_conditional_edges("final_audit", final_audit_router, {
         "fetcher": "task_fetcher",
         END: END
     })
-
-    workflow.add_edge("final_compiler", END)
 
     return workflow.compile()
 
