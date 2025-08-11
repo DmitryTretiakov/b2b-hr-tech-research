@@ -8,7 +8,7 @@ from agents.workers import (
     FinancialModelAgent, ProductManagerAgent, ReviserAgent,
     OutlineAgent, SectionWriterAgent
 )
-from agents.meta_agents import ArchitectAgent, KnowledgeJanitorAgent, ValidatorAgent
+from agents.meta_agents import ArchitectAgent, KnowledgeJanitorAgent, ValidatorAgent, FailureAnalystAgent
 from utils.helpers import citation_post_processor
 import os
 import json
@@ -25,6 +25,14 @@ MODEL_ESCALATION_PATH = {
 # ====================================================================================
 # === 1. ОПРЕДЕЛЕНИЕ УЗЛОВ ГРАФА (NODES) =============================================
 # ====================================================================================
+def final_audit_node(state: GraphState, architect: ArchitectAgent) -> GraphState:
+    """
+    Вызывает архитектора для финальной проверки состояния системы.
+    """
+    print("\n--- Узел: Final Audit ---")
+    audit_report = architect.conduct_final_audit(state)
+    state.setdefault('node_outputs', {})['final_audit_report'] = audit_report
+    return state
 
 def supervisor_node(state: GraphState, supervisor: SupervisorAgent) -> GraphState:
     print("\n--- Узел: Supervisor ---")
@@ -179,6 +187,21 @@ def reflection_node(state: GraphState, analyst: AnalystAgent, supervisor: Superv
         state['model_assignments'].update(next_phase_plan.get('initial_model_assignments', {}))
     return state
 
+def failure_analyst_node(state: GraphState, failure_analyst: FailureAnalystAgent) -> GraphState:
+    """
+    Вызывает агента-диагноста для анализа последней проваленной задачи.
+    """
+    print("\n--- Узел: Failure Analyst ---")
+    # Увеличиваем счетчик эскалаций ПЕРЕД анализом
+    state['escalation_count'] = state.get('escalation_count', 0) + 1
+    
+    last_failed_task = state['completed_tasks'][-1]
+    error_message = state['error_message']
+
+    analysis_report = failure_analyst.execute(last_failed_task, error_message, state)
+    state.setdefault('node_outputs', {})['failure_analysis_report'] = analysis_report
+    return state
+
 def prepare_for_architect_node(state: GraphState) -> GraphState:
     """
     Этот узел-помощник выполняет атомарную операцию: готовит состояние для Архитектора.
@@ -195,39 +218,56 @@ def prepare_for_architect_node(state: GraphState) -> GraphState:
         state['current_task'] = None
     return state
 
-def architect_node(state: GraphState, architect: ArchitectAgent) -> GraphState:
+def architect_node(state: GraphState, architect: ArchitectAgent, validator: ValidatorAgent) -> GraphState:
     """
-    Узел для самокоррекции. Работает по новой, проактивной схеме.
+    Узел для самокоррекции. Теперь работает в цикле до тех пор,
+    пока задача не станет полностью выполнимой.
     """
     print("\n--- Узел: Architect ---")
     
-    task_to_fix = state.get('current_task')
-    validation_report = state.get('node_outputs', {}).get('validation_report')
+    max_iterations = 3
+    for i in range(max_iterations):
+        print(f"   [ArchitectNode] Итерация самокоррекции {i + 1}/{max_iterations}...")
+        
+        # На каждой итерации нам нужна "свежая" копия задачи из current_task
+        task_to_fix = state.get('current_task')
+        if not task_to_fix:
+            print("!!! [ArchitectNode] КРИТИЧЕСКАЯ ОШИБКА: Нет текущей задачи для работы.")
+            state.setdefault('node_outputs', {})['architect_status'] = 'FATAL_ERROR'
+            return state
 
-    # === ИЗМЕНЕНИЕ НАЧАТО: Убрана хрупкая проверка на validation_report ===
-    if not task_to_fix:
-        print("!!! [ArchitectNode] КРИТИЧЕСКАЯ ОШИБКА: Нет текущей задачи для работы. Архитектор не может продолжить.")
-        state.setdefault('node_outputs', {})['architect_status'] = 'FATAL_ERROR'
-        return state
-    # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
+        # Шаг 1: Проверяем, выполнима ли задача СЕЙЧАС
+        validation_report = validator.execute(task_to_fix)
+        if validation_report.get('is_executable'):
+            print("   [ArchitectNode] <- Задача стала выполнимой. Возвращаю в очередь.")
+            state.setdefault('node_outputs', {})['architect_status'] = 'REMEDIATED'
+            # Важно: current_task должен быть перемещен обратно в очередь, а не оставаться в current_task
+            state['task_queue'].insert(0, state.pop('current_task'))
+            state['escalation_count'] = 0
+            return state
 
-    print(f"   [ArchitectNode] Взял на исправление задачу: {task_to_fix.get('task_id')}")
-    
-    # Теперь агент сам должен быть устойчив к отсутствию отчета
-    remediated_task = architect.fix_or_enhance(task_to_fix, validation_report)
-    
-    if remediated_task.get('status') == 'FATAL_ERROR':
-        print("   [ArchitectNode] <- Архитектор не смог внести исправления. Сигнализирую о фатальной ошибке.")
-        state.setdefault('node_outputs', {})['architect_status'] = 'FATAL_ERROR'
-        state['completed_tasks'].append(remediated_task)
-    else:
-        print(f"   [ArchitectNode] <- Задача {task_to_fix['task_id']} исправлена и возвращена в очередь.")
-        state['task_queue'].insert(0, remediated_task)
-        state.setdefault('node_outputs', {})['architect_status'] = 'REMEDIATED'
+        # Шаг 2: Если невыполнима, создаем новый инструмент
+        failure_feedback = state.get('node_outputs', {}).get('architect_feedback')
+        # Мы передаем задачу, но не ожидаем ее изменения, так как статус меняется только при ошибке
+        remediated_task_attempt = architect.fix_or_enhance(task_to_fix.copy(), validation_report, failure_feedback)
 
-    state['escalation_count'] = 0
-    state['current_task'] = None
+        if remediated_task_attempt.get('status') == 'FATAL_ERROR':
+            print("   [ArchitectNode] <- Архитектор не смог внести исправления. Сигнализирую о фатальной ошибке.")
+            state.setdefault('node_outputs', {})['architect_status'] = 'FATAL_ERROR'
+            state['completed_tasks'].append(state.pop('current_task')) # Записываем исходную задачу как проваленную
+            return state
+        
+        # Если инструмент создан, остаемся в цикле для следующей проверки
+        print("   [ArchitectNode] Инструмент успешно создан. Повторная проверка выполнимости...")
+
+    # Если вышли из цикла
+    print(f"   [ArchitectNode] !!! Не удалось сделать задачу выполнимой после {max_iterations} итераций.")
+    state.setdefault('node_outputs', {})['architect_status'] = 'FATAL_ERROR'
+    task_to_fix = state.pop('current_task')
+    task_to_fix['status'] = 'FATAL_ERROR'
+    state['completed_tasks'].append(task_to_fix)
     return state
+
 
 
 def outline_node(state: GraphState, outline_agent: OutlineAgent) -> GraphState:
@@ -319,48 +359,119 @@ def revision_node(state: GraphState, reviser: ReviserAgent, supervisor: Supervis
 # === 2. ОПРЕДЕЛЕНИЕ МАРШРУТИЗАТОРОВ (CONDITIONAL EDGES) =============================
 # ====================================================================================
 
-def escalation_router(state: GraphState) -> str:
+def task_router(state: GraphState) -> str:
     """
-    Маршрутизатор, реализующий логику Каскадной Эскалации.
+    Маршрутизатор, который проверяет, есть ли активная задача для выполнения.
     """
-    print("\n--- Узел: Escalation Router ---")
-    if not state['completed_tasks']: return "fetcher"
-    last_completed_task = state['completed_tasks'][-1]
+    print("\n--- Узел: Task Router ---")
+    if state.get('current_task'):
+        print("   [TaskRouter] -> Есть активная задача. Перехожу к валидации.")
+        return "tool_validator"
+    else:
+        # === ИЗМЕНЕНИЕ НАЧАТО: Перенаправление на финальный аудит вместо ревизии ===
+        print("   [TaskRouter] -> Очередь задач пуста. Перехожу к финальному аудиту.")
+        return "final_audit"
+        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
+
     
+def final_audit_router(state: GraphState) -> str:
+    """
+    Маршрутизатор, который решает, завершать ли граф на основе вердикта аудитора.
+    """
+    print("\n--- Узел: Final Audit Router ---")
+    report = state.get('node_outputs', {}).get('final_audit_report', {})
+    
+    if report.get('is_complete'):
+        print("   [FinalAuditRouter] -> Аудит пройден. Цель достигнута. Завершение работы.")
+        return END
+    else:
+        new_tasks = report.get('new_tasks', [])
+        if new_tasks:
+            print(f"   [FinalAuditRouter] -> Аудит выявил недочеты. Добавляю {len(new_tasks)} новых задач.")
+            state['task_queue'].extend(new_tasks)
+            # Предполагаем, что в новых задачах есть model_assignments, если нет - нужно будет расширить
+            for task in new_tasks:
+                if 'model_name' in task:
+                    state['model_assignments'][task['task_id']] = task['model_name']
+            return "fetcher"
+        else:
+            print("   [FinalAuditRouter] -> Аудит не пройден, но новых задач не предложено. Завершение работы во избежание цикла.")
+            return END
+
+def post_execution_router(state: GraphState) -> str:
+    """
+    Маршрутизатор, который решает, что делать после выполнения задачи.
+    """
+    print("\n--- Узел: Post-Execution Router ---")
+    last_completed_task = state['completed_tasks'][-1]
+
     if last_completed_task['status'] == 'SUCCESS':
+        print("   [PostExecRouter] -> Задача успешна. Проверяю, что делать дальше.")
         state['escalation_count'] = 0
-        is_research = not last_completed_task['task_id'].startswith('artifact_')
-        remaining_research = any(not t['task_id'].startswith('artifact_') for t in state['task_queue'])
-        if is_research and not remaining_research: return "revision"
+        is_research_task = not last_completed_task['task_id'].startswith('artifact_')
+        remaining_research_tasks = any(not t['task_id'].startswith('artifact_') for t in state['task_queue'])
+        
+        if is_research_task and not remaining_research_tasks:
+            print("   [PostExecRouter] -> Последняя исследовательская задача выполнена. Перехожу к ревизии.")
+            return "revision"
+        
+        print("   [PostExecRouter] -> Исследование продолжается. Беру следующую задачу.")
+        return "fetcher"
+    else:
+        print(f"   [PostExecRouter] !!! Задача {last_completed_task['task_id']} провалена. Передаю на анализ.")
+        return "failure_analyst"
+
+def failure_router(state: GraphState) -> str:
+    """
+    Маршрутизатор, который направляет граф на основе вердикта FailureAnalystAgent.
+    """
+    print("\n--- Узел: Failure Router ---")
+    report = state.get('node_outputs', {}).get('failure_analysis_report', {})
+    action = report.get('action', 'FATAL_ERROR')
+    data = report.get('data', {})
+
+    print(f"   [FailureRouter] -> Вердикт аналитика: '{action}'.")
+
+    if action == 'RETRY':
+        failed_task = state['completed_tasks'].pop()
+        failed_task['status'] = 'PENDING'
+        state['task_queue'].insert(0, failed_task)
         return "fetcher"
 
-    print(f"   [EscalationRouter] !!! Задача {last_completed_task['task_id']} провалена.")
-    
-    escalation_count = state.get('escalation_count', 0) + 1
-    state['escalation_count'] = escalation_count
-    
-    # Проверяем лимит эскалаций. MAX_ESCALATIONS_PER_TASK = 2 означает, что после 3-го сбоя (1-й + 2 эскалации) идем к архитектору.
-    if escalation_count > MAX_ESCALATIONS_PER_TASK:
-        print(f"   [EscalationRouter] !!! Лимит эскалаций ({MAX_ESCALATIONS_PER_TASK}) для задачи исчерпан. Передаю Архитектору.")
-        # === ИЗМЕНЕНИЕ НАЧАТО: Маршрут изменен на узел-подготовитель ===
-        return "prepare_for_architect"
-        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
+    if action == 'RETRY_WITH_NEW_MODEL':
+        next_model = data.get('next_model_name')
+        if not next_model:
+             print("   [FailureRouter] !!! Аналитик предложил сменить модель, но не указал какую. Фатальная ошибка.")
+             return END
+        
+        failed_task = state['completed_tasks'].pop()
+        failed_task['status'] = 'PENDING'
+        state['model_assignments'][failed_task['task_id']] = next_model
+        state['task_queue'].insert(0, failed_task)
+        print(f"   [FailureRouter] Эскалирую задачу на модель '{next_model}'.")
+        return "fetcher"
 
-    current_model = state['model_assignments'][last_completed_task['task_id']]
-    next_model = MODEL_ESCALATION_PATH.get(current_model)
-    
-    if not next_model:
-        print(f"   [EscalationRouter] !!! Модель '{current_model}' на пределе эскалации. Передаю Архитектору.")
-        # === ИЗМЕНЕНИЕ НАЧАТО: Маршрут изменен на узел-подготовитель ===
+    if action == 'REGENERATE_TOOL':
+        state.setdefault('node_outputs', {})['architect_feedback'] = data.get('feedback')
         return "prepare_for_architect"
-        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
 
-    print(f"   [EscalationRouter] -> Эскалирую задачу на модель '{next_model}' (Попытка {escalation_count} из {MAX_ESCALATIONS_PER_TASK}).")
-    state['model_assignments'][last_completed_task['task_id']] = next_model
-    failed_task = state['completed_tasks'].pop()
-    failed_task['status'] = 'PENDING'
-    state['task_queue'].insert(0, failed_task)
-    return "fetcher"
+    if action == 'CREATE_NEW_TASK':
+        new_desc = data.get('new_task_description')
+        if not new_desc:
+            print("   [FailureRouter] !!! Аналитик предложил создать новую задачу, но не дал описание. Фатальная ошибка.")
+            return END
+        
+        last_failed_task = state['completed_tasks'][-1]
+        new_task = last_failed_task.copy()
+        new_task['task_id'] = f"{last_failed_task['task_id']}_remediated"
+        new_task['description'] = new_desc
+        new_task['status'] = 'PENDING'
+        state['task_queue'].insert(0, new_task)
+        print("   [FailureRouter] Создана новая, скорректированная задача.")
+        return "fetcher"
+
+    print("   [FailureRouter] !!! Неустранимая ошибка. Аварийное завершение.")
+    return END
 
 def validation_router(state: GraphState) -> str:
     """
@@ -471,7 +582,10 @@ def build_graph(agents: dict, output_dir: str):
     workflow.add_node("tool_validator", lambda state: tool_validator_node(state, agents['Validator']))
     workflow.add_node("task_executor", lambda state: task_executor_node(state, agents))
     workflow.add_node("prepare_for_architect", prepare_for_architect_node)
-    workflow.add_node("architect", lambda state: architect_node(state, agents['Architect']))
+    workflow.add_node("architect", lambda state: architect_node(state, agents['Architect'], agents['Validator']))
+    workflow.add_node("failure_analyst", lambda state: failure_analyst_node(state, agents['FailureAnalyst']))
+    workflow.add_node("final_audit", lambda state: final_audit_node(state, agents['Architect']))
+
     workflow.add_node("revision", lambda state: revision_node(state, agents['Reviser'], agents['Supervisor']))
     workflow.add_node("qa", lambda state: qa_node(state, agents['QualityAssessor']))
     workflow.add_node("fixer", lambda state: fixer_node(state, agents['Fixer']))
@@ -488,18 +602,27 @@ def build_graph(agents: dict, output_dir: str):
     workflow.set_entry_point("supervisor")
     workflow.add_edge("supervisor", "task_fetcher")
     
-    workflow.add_edge("task_fetcher", "tool_validator")
+    workflow.add_conditional_edges(
+        "task_fetcher",
+        task_router,
+        {"tool_validator": "tool_validator", "final_audit": "final_audit"}
+    )
+    
     workflow.add_conditional_edges("tool_validator", validation_router, {
         "executor": "task_executor",
         "architect": "architect",
         END: END
     })
     
-    # === ИЗМЕНЕНИЕ НАЧАТО: Восстановлен путь к архитектору ===
-    workflow.add_conditional_edges("task_executor", escalation_router, {
-        "fetcher": "task_fetcher", 
+    workflow.add_conditional_edges("task_executor", post_execution_router, {
+        "fetcher": "task_fetcher",
         "revision": "revision",
-        "prepare_for_architect": "prepare_for_architect", # Новый маршрут
+        "failure_analyst": "failure_analyst"
+    })
+
+    workflow.add_conditional_edges("failure_analyst", failure_router, {
+        "fetcher": "task_fetcher",
+        "prepare_for_architect": "prepare_for_architect",
         END: END
     })
     
@@ -523,6 +646,11 @@ def build_graph(agents: dict, output_dir: str):
     workflow.add_edge("outline", "section_fetcher")
     workflow.add_edge("section_fetcher", "section_writer")
     workflow.add_conditional_edges("section_writer", section_writing_router, {"fetcher": "section_fetcher", "compiler": "final_compiler"})
+    workflow.add_conditional_edges("final_audit", final_audit_router, {
+        "fetcher": "task_fetcher",
+        END: END
+    })
+
     workflow.add_edge("final_compiler", END)
 
     return workflow.compile()

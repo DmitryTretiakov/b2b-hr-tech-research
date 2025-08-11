@@ -3,7 +3,7 @@ import json
 from agents.base_agent import BaseAgent
 from core.tool_registry import ToolRegistry
 from utils.helpers import invoke_llm_for_json_with_retry
-from agents.models import ArchitectDecision, ValidationReport
+from agents.models import ArchitectDecision, FinalAuditReport, ValidationReport, FailureAnalysisReport
 
 # Используем forward reference hints для циклических зависимостей типов
 if 'LLMClient' not in locals():
@@ -79,7 +79,7 @@ class ToolSmithAgent(BaseAgent):
         """
         print(f"   [ToolSmithAgent] -> Генерирую код для инструмента: {tool_description[:100]}...")
         
-        prompt = f"""
+        base_prompt = f"""
 Твоя роль: Старший Python-разработчик, специализирующийся на написании надежных, изолированных инструментов, работающих в строго контролируемом окружении.
 Твоя задача: Написать код для нового инструмента.
 
@@ -112,7 +112,7 @@ class ToolSmithAgent(BaseAgent):
 2.  **АНТИ-ПАТТЕРН: Чрезмерная зависимость от регулярных выражений для извлечения сложных данных.**
     - **ПОЧЕМУ ЭТО ПЛОХО:** Регулярные выражения хороши для простых форматов, но они не понимают контекст. Например, извлекая зарплату, они могут ошибочно вытащить номер телефона или другую цифру.
     - **ПРАВИЛЬНЫЙ ПОДХОД:** Для извлечения данных, требующих понимания смысла (например, "найди зарплату", "найди имя CEO"), используй многошаговую логику: получи текст со страницы, а затем сделай внутренний, узконаправленный вызов к LLM с просьбой извлечь нужную информацию из этого текста в формате JSON.
-    
+
 **ПРИМЕР ПРАВИЛЬНОЙ СТРУКТУРЫ:**
 ```python
 # Разрешенные импорты
@@ -138,17 +138,35 @@ def {tool_name}(query: str) -> dict:
 """
 
 
-        
-        response = self.llm_client.invoke("gemini-2.5-pro", prompt)
-        code = response.content if hasattr(response, 'content') else ""
-        
-        if code.startswith("```python"):
-            code = code[len("```python"):].strip()
-        if code.endswith("```"):
-            code = code[:-3].strip()
+        max_retries = 2
+        for attempt in range(max_retries):
+            print(f"      [ToolSmith] Попытка генерации кода {attempt + 1}/{max_retries}...")
             
-        print("   [ToolSmithAgent] <- Генерация инструмента завершена.")
-        return code
+            current_prompt = base_prompt
+            if attempt > 0:
+                current_prompt += f"\n\n**ВАЖНО:** Твой предыдущий код не прошел проверку синтаксиса. Ошибка: `{syntax_error}`. Пожалуйста, исправь код и верни только валидный Python-код."
+
+            response = self.llm_client.invoke("gemini-2.5-pro", current_prompt)
+            code = response.content if hasattr(response, 'content') else ""
+            
+            # Очистка кода от Markdown
+            if code.startswith("```python"):
+                code = code[len("```python"):].strip()
+            if code.endswith("```"):
+                code = code[:-3].strip()
+
+            # Проверка синтаксиса
+            try:
+                compile(code, f"{tool_name}.py", "exec")
+                print("      [ToolSmith] <- Синтаксис кода успешно проверен.")
+                print("   [ToolSmithAgent] <- Генерация инструмента завершена.")
+                return code
+            except SyntaxError as e:
+                print(f"      [ToolSmith] !!! Ошибка синтаксиса в сгенерированном коде: {e}")
+                syntax_error = e # Сохраняем ошибку для следующей итерации
+
+        # Если все попытки провалились
+        raise Exception(f"Не удалось сгенерировать синтаксически корректный код для инструмента '{tool_name}' после {max_retries} попыток.")
     
 
 class ValidatorAgent(BaseAgent):
@@ -204,25 +222,27 @@ class ArchitectAgent(BaseAgent):
         super().__init__(llm_client, budget_manager, tool_registry)
         self.toolsmith = toolsmith
 
-    def fix_or_enhance(self, failed_task: dict, validation_report: dict | None) -> dict:
+    def fix_or_enhance(self, failed_task: dict, validation_report: dict | None, failure_feedback: str | None) -> dict:
         """
-        Пытается исправить проваленную задачу. Основная стратегия - создание инструмента.
-        Теперь устойчив к отсутствию validation_report.
+        Пытается исправить проваленную задачу.
+        Приоритет: фидбек от FailureAnalyst, затем отчет от Validator.
         """
         print(f"   [ArchitectAgent] -> Анализирую задачу '{failed_task.get('task_id')}'...")
 
-        # === ИЗМЕНЕНИЕ НАЧАТО: Добавлена проверка на наличие отчета и описания инструмента ===
         tool_description = None
-        if validation_report and validation_report.get('missing_tool_description'):
+        # Приоритет у фидбека от аналитика сбоев
+        if failure_feedback:
+            print("   [ArchitectAgent] Использую фидбек от FailureAnalyst для перегенерации инструмента.")
+            tool_description = failure_feedback # Предполагаем, что фидбек - это и есть описание для ToolSmith
+        elif validation_report and validation_report.get('missing_tool_description'):
             tool_description = validation_report.get('missing_tool_description')
         
         if not tool_description:
-            print("   [ArchitectAgent] !!! Не удалось определить необходимый инструмент (отчет валидатора отсутствует или пуст).")
-            print("   [ArchitectAgent] <- Причина сбоя, вероятно, не в инструментах (например, ошибка API или логики агента). Не могу исправить автоматически.")
+            print("   [ArchitectAgent] !!! Не удалось определить необходимый инструмент (отчет валидатора и фидбек отсутствуют).")
+            print("   [ArchitectAgent] <- Причина сбоя, вероятно, не в инструментах. Не могу исправить автоматически.")
             failed_task['status'] = 'FATAL_ERROR'
             return failed_task
-        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
-
+        
         # Генерируем имя для инструмента из его описания
         prompt_for_name = "Придумай короткое, но осмысленное имя в snake_case для инструмента, который делает следующее: '{}'. Верни только имя, например: 'search_and_read_webpage'.".format(tool_description)
         response = self.llm_client.invoke("gemini-2.5-flash", prompt_for_name)
@@ -233,10 +253,112 @@ class ArchitectAgent(BaseAgent):
             tool_code = self.toolsmith.generate_tool_code(tool_name, tool_description)
             self.tool_registry.register_tool(tool_name, tool_code)
             
-            # Возвращаем задачу в очередь для повторного выполнения с новым инструментом
             failed_task['status'] = 'PENDING'
             return failed_task
         except Exception as e:
             print(f"   [ArchitectAgent] !!! Процесс создания инструмента провалился: {e}. Сигнализирую о фатальной ошибке.")
             failed_task['status'] = 'FATAL_ERROR'
             return failed_task
+        
+    def conduct_final_audit(self, state: dict) -> dict:
+        """
+        Проводит финальную проверку состояния системы на соответствие главной цели.
+        """
+        print(f"   [ArchitectAgent] -> Провожу финальный аудит системы...")
+        model_name = "gemini-2.5-pro" # Для этой критической задачи нужна лучшая модель
+        sanitizer_model = "gemini-2.5-flash"
+
+        # Собираем ключевую информацию для принятия решения
+        audit_context = {
+            "main_goal": state.get("user_config", {}).get("user_context", {}).get("main_goal"),
+            "artifacts_created": list(state.get("artifacts", {}).keys()),
+            "knowledge_base_summary": {
+                "total_facts": len(state.get("knowledge_base", {})),
+                "key_topics": list(set(fact['claim_id'].split('_')[1] for fact in state.get("knowledge_base", {}).values()))
+            }
+        }
+        context_str = json.dumps(audit_context, indent=2, ensure_ascii=False)
+
+        prompt = f"""
+**ТВОЯ РОЛЬ:** Главный Аудитор Проекта. Твоя задача - вынести финальный вердикт: достигнута ли главная цель проекта.
+
+**КОНТЕКСТ ДЛЯ АУДИТА:**
+```json
+{context_str}
+```
+
+**ТВОЯ ЗАДАЧА:**
+1.  **Сравни Цель и Результат:** Внимательно прочитай `main_goal`. Сравни ее с тем, что было реально сделано (`artifacts_created`, `knowledge_base_summary`).
+2.  **Прими Решение:**
+    *   Если ты считаешь, что созданные артефакты и собранные данные полностью отвечают на `main_goal`, установи `is_complete: true`.
+    *   Если чего-то не хватает (например, цель была "создать фин. модель и презентацию", а создан только один артефакт), установи `is_complete: false`.
+3.  **Обоснуй и Действуй:**
+    *   В поле `reasoning` четко объясни свое решение.
+    *   Если `is_complete: false`, в поле `new_tasks` предложи список **конкретных** задач, которые нужно выполнить, чтобы закрыть пробелы. Например: `[{{"task_id": "final_artifact_01", "agent_name": "RoadmapVisualizationAgent", "description": "Создать финальную диаграмму дорожной карты в формате Mermaid на основе существующих артефактов."}}]`.
+
+Верни ТОЛЬКО JSON-объект, соответствующий схеме `FinalAuditReport`.
+"""
+        report = invoke_llm_for_json_with_retry(
+            self.llm_client, model_name, sanitizer_model, prompt,
+            FinalAuditReport, self.budget_manager
+        )
+        print(f"   [ArchitectAgent] <- Вердикт аудита: is_complete={report.get('is_complete')}")
+        return report
+
+        
+
+class FailureAnalystAgent(BaseAgent):
+    """
+    Агент-диагност, который анализирует сбои в задачах и предлагает
+    стратегию их исправления. Использует быструю и дешевую модель.
+    """
+    def execute(self, failed_task: dict, error_message: str, state: dict) -> dict:
+        """
+        Анализирует контекст сбоя и возвращает отчет с планом действий.
+        """
+        print(f"   [FailureAnalystAgent] -> Анализирую сбой в задаче '{failed_task.get('task_id')}'...")
+        model_name = "gemini-2.5-flash"
+        sanitizer_model = "gemini-2.5-flash-lite"
+
+        context = {
+            "failed_task": failed_task,
+            "error_message": error_message,
+            "model_used": state['model_assignments'].get(failed_task.get('task_id')),
+            "escalation_count": state.get('escalation_count', 0),
+            "available_tools": self.tool_registry.get_tools_for_prompt() if self.tool_registry else "No tools available."
+        }
+        context_str = json.dumps(context, indent=2, ensure_ascii=False)
+
+        prompt = f"""
+**ТВОЯ РОЛЬ:** Ведущий Инженер по Надежности Систем (SRE). Твоя задача - диагностировать сбой и предложить наилучший, наиболее экономичный способ его устранения.
+
+**КОНТЕКСТ СБОЯ:**
+```json
+{context_str}
+```
+
+**ТВОЯ ЗАДАЧА - ПРОВЕСТИ АНАЛИЗ И ВЫБРАТЬ ОДНО ДЕЙСТВИЕ:**
+
+1.  **Анализ Ошибки:** Внимательно изучи `error_message`.
+    *   Если ошибка похожа на временный сетевой сбой, проблему с API или таймаут (`ConnectionError`, `Timeout`, `50x HTTP error`), выбери действие `RETRY`.
+    *   Если ошибка явно указывает на исчерпание квот или лимитов, выбери `FATAL_ERROR`, так как дальнейшие попытки бессмысленны.
+    *   Если ошибка связана с тем, что инструмент не смог найти данные (например, "не удалось найти информацию о зарплате"), это проблема в подходе. Выбери `CREATE_NEW_TASK` и переформулируй исходную задачу, сделав ее более общей или предложив другой подход (например, "Искать зарплату для Python Developer в России, а не только в Томске").
+    *   Если ошибка связана с кодом самого инструмента (например, `TypeError`, `AttributeError` внутри инструмента), выбери `REGENERATE_TOOL` и в поле `feedback` дай четкие инструкции для `ArchitectAgent`, что именно нужно исправить в коде.
+    *   Если предыдущие попытки уже провалились (`escalation_count` > 0) и ошибка не очевидна, возможно, стоит попробовать более мощную модель. Выбери `RETRY_WITH_NEW_MODEL`.
+    *   Если ничего из вышеперечисленного не подходит или исправить ситуацию невозможно, выбери `FATAL_ERROR`.
+
+2.  **Заполнение `data`:**
+    *   Для `RETRY_WITH_NEW_MODEL`: Укажи следующую по мощности модель в `data.next_model_name`.
+    *   Для `REGENERATE_TOOL`: Укажи фидбек в `data.feedback`.
+    *   Для `CREATE_NEW_TASK`: Укажи новый, улучшенный текст задачи в `data.new_task_description`.
+
+Верни ТОЛЬКО JSON-объект, соответствующий схеме `FailureAnalysisReport`.
+"""
+
+        report = invoke_llm_for_json_with_retry(
+            self.llm_client, model_name, sanitizer_model, prompt,
+            FailureAnalysisReport, self.budget_manager
+        )
+        print(f"   [FailureAnalystAgent] <- Вердикт: {report.get('action')}. Причина: {report.get('reasoning')}")
+        return report
+

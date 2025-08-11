@@ -157,3 +157,51 @@ class RoadmapVisualizationArtifact(BaseModel):
     title: str = Field(description="Заголовок дорожной карты.")
     mermaid_diagram: str = Field(description="Полностью готовая диаграмма в синтаксисе Mermaid.js, представляющая дорожную карту (например, диаграмма Ганта).")
     commentary: str = Field(description="Краткий комментарий, объясняющий ключевые этапы на диаграмме.")
+
+class FailureAnalysisReport(BaseModel):
+    """
+    Структурированный отчет от FailureAnalystAgent.
+    Определяет причину сбоя и предлагает план по его устранению.
+    """
+    action: Literal['RETRY', 'RETRY_WITH_NEW_MODEL', 'REGENERATE_TOOL', 'CREATE_NEW_TASK', 'FATAL_ERROR'] = Field(
+        description="Выбранное действие для исправления сбоя."
+    )
+    reasoning: str = Field(
+        description="Подробное объяснение, почему было выбрано именно это действие."
+    )
+    data: Optional[Dict] = Field(
+        default=None,
+        description="""Словарь с данными для выполнения действия.
+- для 'RETRY_WITH_NEW_MODEL': {'next_model_name': '...'}
+- для 'REGENERATE_TOOL': {'feedback': '...'}
+- для 'CREATE_NEW_TASK': {'new_task_description': '...'}
+"""
+    )
+
+class FinalAuditReport(BaseModel):
+    """
+    Структурированный отчет от ArchitectAgent после финального аудита.
+    Определяет, достигнута ли главная цель проекта.
+    """
+    is_complete: bool = Field(
+        description="True, если главная цель проекта полностью достигнута и все необходимые артефакты созданы. False, если требуются доработки."
+    )
+    reasoning: str = Field(
+        description="Подробное объяснение вердикта. Если is_complete=false, здесь должно быть указано, чего именно не хватает для достижения цели."
+    )
+    new_tasks: Optional[List[Dict]] = Field(
+        default=None,
+        description="Список новых задач, которые необходимо выполнить для достижения цели. Заполняется только если is_complete=false."
+    )
+
+class Task(BaseModel):
+    """Структура для одной задачи в плане."""
+    task_id: str = Field(description="Уникальный ID задачи, например, 'data_collection_01'.")
+    agent_name: str = Field(description="Имя агента, ответственного за выполнение.")
+    description: str = Field(description="Подробное описание того, что нужно сделать.")
+    dependencies: List[str] = Field(default=[], description="Список ID задач, которые должны быть выполнены перед этой.")
+
+class GraphPlan(BaseModel):
+    """Pydantic-модель для описания плана графа."""
+    tasks: List[Task] = Field(description="Список всех задач с их зависимостями.")
+    initial_model_assignments: Dict[str, str] = Field(description="Словарь {task_id: model_name} с начальным распределением моделей.")
