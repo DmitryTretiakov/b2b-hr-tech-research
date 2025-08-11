@@ -58,13 +58,34 @@ def task_fetcher_node(state: GraphState) -> GraphState:
 
 def tool_validator_node(state: GraphState, validator: ValidatorAgent) -> GraphState:
     """
-    Проверяет, можно ли выполнить задачу с текущими инструментами, ПЕРЕД ее запуском.
+    Проверяет, можно ли выполнить задачу. Пропускает "интеллектуальные" задачи напрямую.
     """
     print("\n--- Узел: Tool Validator ---")
     task = state.get('current_task')
     if not task: return state
 
-    report = validator.execute(task)
+    # Список агентов, которые не используют внешние инструменты, а работают за счет LLM.
+    INTELLECTUAL_AGENTS = [
+        "CompetitorAnalysisAgent",
+        "TechnologyDeepDiveAgent",
+        "ProductOwnerMemoAgent",
+        "InvestmentMemoAgent",
+        "FinancialModelAgent", # Хотя он генерирует артефакт, он делает это на основе KB, а не инструментов
+        "ProductManagerAgent",
+        "OutlineAgent",
+        "SectionWriterAgent",
+        "ReportWriterAgent"
+    ]
+
+    agent_name = task.get('agent_name')
+    if agent_name in INTELLECTUAL_AGENTS:
+        print(f"   [ValidatorNode] -> Задача для интеллектуального агента '{agent_name}'. Пропускаю напрямую к исполнителю.")
+        # Создаем "пустой" положительный отчет, чтобы маршрутизатор сработал правильно.
+        report = {"is_executable": True, "reasoning": "Задача для интеллектуального агента, инструменты не требуются."}
+    else:
+        print(f"   [ValidatorNode] -> Задача для инструментального агента '{agent_name}'. Запускаю полную проверку.")
+        report = validator.execute(task)
+    
     state.setdefault('node_outputs', {})['validation_report'] = report
     return state
 
@@ -603,10 +624,13 @@ def build_graph(agents: dict, output_dir: str):
             "final_audit": "final_audit" # Выход из цикла, если задач нет
         }
     )
+    
+    # === ИЗМЕНЕНИЕ НАЧАТО: Убран ошибочный переход к prepare_for_architect ===
     workflow.add_conditional_edges("tool_validator", validation_router, {
         "executor": "task_executor",
-        "architect": "prepare_for_architect" # Переход к подготовке для архитектора
+        "architect": "architect" # Направляем НАПРЯМУЮ к архитектору
     })
+    # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
 
     # 2. Маршрутизация после выполнения задачи (успех или неудача)
     workflow.add_conditional_edges("task_executor", post_execution_router, {
@@ -618,7 +642,7 @@ def build_graph(agents: dict, output_dir: str):
     # 3. Ветка интеллектуальной обработки сбоев
     workflow.add_conditional_edges("failure_analyst", failure_router, {
         "fetcher": "task_fetcher",
-        "prepare_for_architect": "prepare_for_architect",
+        "prepare_for_architect": "prepare_for_architect", # Здесь prepare_for_architect остается, т.к. это реактивный путь
         END: END
     })
 
