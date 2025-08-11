@@ -1,108 +1,129 @@
 # main.py
 import os
 import json
-import yaml
 import argparse
 from dotenv import load_dotenv
-from core.state import GraphState
+import yaml
+
 from core.llm_client import LLMClient
 from core.budget_manager import APIBudgetManager
 from core.tool_registry import ToolRegistry
+from core.state import GraphState
+from orchestrator import build_graph, run
+
+# === ИЗМЕНЕНИЕ НАЧАТО: Импортируем ValidatorAgent ===
+from agents.meta_agents import ArchitectAgent, KnowledgeJanitorAgent, ToolSmithAgent, ValidatorAgent
+# === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
+
 from agents.supervisor import SupervisorAgent
 from agents.workers import (
-    OutlineAgent, ResearcherAgent, ContrarianAgent, QualityAssessorAgent, FixerAgent, 
+    ResearcherAgent, ContrarianAgent, QualityAssessorAgent, FixerAgent, 
     AnalystAgent, ReportWriterAgent, SanityCheckCritic,
-    FinancialModelAgent, ProductManagerAgent, ReviserAgent, SectionWriterAgent
+    FinancialModelAgent, ProductManagerAgent, ReviserAgent,
+    OutlineAgent, SectionWriterAgent
 )
-from agents.meta_agents import ArchitectAgent, KnowledgeJanitorAgent, ToolSmithAgent
-import orchestrator
+
+# --- Константы ---
+OUTPUT_DIR = "output"
+STATE_FILE = os.path.join(OUTPUT_DIR, "graph_state.json")
+CONFIG_FILE = "config.yaml"
+API_LIMITS = {
+    "gemini-2.5-pro": 100, "gemini-2.5-flash": 250, "gemini-2.5-flash-lite": 1000,
+    "gemma-3": 14400, "gemma-3n": 14400, "gemini-embedding-001": 1000,
+}
 
 def main():
-    # 1. Настройка аргументов командной строки
-    parser = argparse.ArgumentParser(description="Запуск системы 'Динамический Фреймворк v4.2'.")
-    parser.add_argument(
-        '--new-plan-keep-kb',
-        action='store_true',
-        help='Начать выполнение с новым планом, но сохранить Базу Знаний из предыдущей сессии.'
-    )
+    # --- 1. Загрузка конфигурации и настройка окружения ---
+    load_dotenv()
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    parser = argparse.ArgumentParser(description="Запуск AI Factory v4.3")
+    parser.add_argument('--new-plan-keep-kb', action='store_true', help="Пересоздать план, но сохранить Базу Знаний.")
     args = parser.parse_args()
 
-    load_dotenv()
-    print("Инициализация системы 'Динамический Фреймворк v4.2'...")
-
-    # 2. Загрузка пользовательского контекста
-    try:
-        with open("config.yaml", "r", encoding="utf-8") as f:
-            user_config = yaml.safe_load(f)
-        print("   [Main] Пользовательский конфиг 'config.yaml' успешно загружен.")
-    except (IOError, yaml.YAMLError) as e:
-        print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось загрузить 'config.yaml'. {e}")
-        return
-
-    # 3. Инициализация базовых сервисов и агентов
-    output_dir = "output"
-    os.makedirs(output_dir, exist_ok=True)
+    # --- 2. Инициализация всех компонентов ---
+    print("Инициализация системы 'Динамический Фреймворк v4.3'...")
     
-    daily_limits = { "gemini-2.5-pro": 100, "gemini-2.5-flash": 250, "gemini-2.5-flash-lite": 1000, "gemma-3": 14400, "gemma-3n": 14400, "gemini-embedding-001": 1000 }
-    budget_manager = APIBudgetManager(output_dir, daily_limits)
+    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+        user_config = yaml.safe_load(f)
+    print(f"   [Main] Пользовательский конфиг '{CONFIG_FILE}' успешно загружен.")
+
+    budget_manager = APIBudgetManager(OUTPUT_DIR, API_LIMITS)
     llm_client = LLMClient(budget_manager)
-    tool_registry = ToolRegistry(generated_tools_dir=os.path.join(output_dir, "generated_tools"))
+    tool_registry = ToolRegistry(generated_tools_dir="tools/generated")
+
+    # --- 2.1. Инициализация Агентов ---
+    toolsmith = ToolSmithAgent(llm_client, budget_manager)
     
-    tool_smith = ToolSmithAgent(llm_client, budget_manager)
-    architect = ArchitectAgent(llm_client, budget_manager, tool_smith, tool_registry)
+    # === ИЗМЕНЕНИЕ НАЧАТО: Создаем экземпляр ValidatorAgent ===
+    validator = ValidatorAgent(llm_client, budget_manager, tool_registry)
+    # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
+
+    architect = ArchitectAgent(llm_client, budget_manager, tool_registry, toolsmith)
     
-    # ИСПРАВЛЕНИЕ: Добавляем ReviserAgent в словарь
     agents = {
-        "Supervisor": SupervisorAgent(llm_client, budget_manager, tool_registry),
+        "Supervisor": SupervisorAgent(llm_client, budget_manager),
         "Reviser": ReviserAgent(llm_client, budget_manager),
         "Researcher": ResearcherAgent(llm_client, budget_manager, tool_registry),
         "Contrarian": ContrarianAgent(llm_client, budget_manager, tool_registry),
         "QualityAssessor": QualityAssessorAgent(llm_client, budget_manager),
         "Fixer": FixerAgent(llm_client, budget_manager),
         "SanityCheckCritic": SanityCheckCritic(llm_client, budget_manager),
-        "Analyst": AnalystAgent(llm_client, budget_manager, tool_registry),
+        "Analyst": AnalystAgent(llm_client, budget_manager),
         "OutlineAgent": OutlineAgent(llm_client, budget_manager),
         "SectionWriterAgent": SectionWriterAgent(llm_client, budget_manager),
         "ReportWriter": ReportWriterAgent(llm_client, budget_manager),
-        "Architect": architect,
         "Janitor": KnowledgeJanitorAgent(llm_client, budget_manager),
-        "ToolSmith": tool_smith,
         "FinancialModelAgent": FinancialModelAgent(llm_client, budget_manager),
         "ProductManagerAgent": ProductManagerAgent(llm_client, budget_manager),
-    }
-    
-    app = orchestrator.build_graph(agents, output_dir)
-
-    # 4. Определение состояния для запуска
-    state_file_path = os.path.join(output_dir, "graph_state.json")
-    
-    initial_state_template: GraphState = {
-        "user_config": user_config, "task_queue": [], "completed_tasks": [], "knowledge_base": {},
-        "artifacts": {}, "current_task": None, "model_assignments": {}, "escalation_count": 0,
-        "error_message": None, "node_outputs": {}, "visited_urls": [], "report_outline": None,
-        "drafted_sections": [], "current_section_to_draft": None
+        "Architect": architect,
+        # === ИЗМЕНЕНИЕ НАЧАТО: Добавляем валидатора в словарь ===
+        "Validator": validator
+        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
     }
 
-    if args.new_plan_keep_kb and os.path.exists(state_file_path):
-        print(f"   [Main] РЕЖИМ: Новый план с сохранением Базы Знаний.")
-        with open(state_file_path, "r", encoding="utf-8") as f:
-            old_state = json.load(f)
-        state_to_run = initial_state_template
-        state_to_run["knowledge_base"] = old_state.get("knowledge_base", {})
-        state_to_run["visited_urls"] = old_state.get("visited_urls", [])
-        print(f"   [Main] <- База Знаний ({len(state_to_run['knowledge_base'])} фактов) перенесена в новую сессию.")
-    elif os.path.exists(state_file_path):
-        print(f"   [Main] РЕЖИМ: Продолжение. Загружаю состояние из '{state_file_path}'...")
-        with open(state_file_path, "r", encoding="utf-8") as f:
-            state_to_run = json.load(f)
+    # --- 3. Сборка графа и определение начального состояния ---
+    app = build_graph(agents, OUTPUT_DIR)
+    initial_state = GraphState(
+        user_config=user_config,
+        task_queue=[],
+        completed_tasks=[],
+        knowledge_base={},
+        artifacts={},
+        model_assignments={},
+        visited_urls=[],
+        escalation_count=0,
+        current_task=None,
+        error_message=None,
+        node_outputs={},
+        report_outline={},
+        drafted_sections=[],
+        current_section_to_draft=None
+    )
+
+    # --- 4. Логика возобновления / нового запуска ---
+    if os.path.exists(STATE_FILE) and not args.new_plan_keep_kb:
+        print(f"   [Main] РЕЖИМ: Продолжение. Загружаю состояние из '{STATE_FILE}'...")
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            saved_state = json.load(f)
+        initial_state.update(saved_state)
         print("   [Main] <- Состояние успешно загружено. Возобновляю работу.")
     else:
-        print("   [Main] РЕЖИМ: Новый запуск. Создаю новую сессию с контекстом из 'config.yaml'.")
-        state_to_run = initial_state_template
+        if args.new_plan_keep_kb and os.path.exists(STATE_FILE):
+            print(f"   [Main] РЕЖИМ: Новый план с сохранением Базы Знаний. Загружаю KB из '{STATE_FILE}'...")
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                saved_state = json.load(f)
+            initial_state['knowledge_base'] = saved_state.get('knowledge_base', {})
+            print("   [Main] <- База Знаний загружена. Генерирую новый план.")
+        else:
+            print(f"   [Main] РЕЖИМ: Новый запуск. Создаю новую сессию с контекстом из '{CONFIG_FILE}'.")
+        # Удаляем старый файл состояния, если он есть, чтобы начать с чистого листа
+        if os.path.exists(STATE_FILE):
+            os.remove(STATE_FILE)
 
-    # 5. Запуск
+    # --- 5. Запуск графа ---
     print("\n--- ЗАПУСК ГРАФА ВЫЧИСЛЕНИЙ v4.3 ---")
-    orchestrator.run(app, state_to_run, state_file_path)
+    run(app, initial_state, STATE_FILE)
 
 if __name__ == "__main__":
     main()

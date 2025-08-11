@@ -8,7 +8,7 @@ from agents.workers import (
     FinancialModelAgent, ProductManagerAgent, ReviserAgent,
     OutlineAgent, SectionWriterAgent
 )
-from agents.meta_agents import ArchitectAgent, KnowledgeJanitorAgent
+from agents.meta_agents import ArchitectAgent, KnowledgeJanitorAgent, ValidatorAgent
 from utils.helpers import citation_post_processor
 import os
 import json
@@ -47,6 +47,19 @@ def task_fetcher_node(state: GraphState) -> GraphState:
     state['error_message'] = None
     print(f"   [FetcherNode] -> Взял в работу задачу: {task['task_id']} ({task['agent_name']})")
     return state
+
+def tool_validator_node(state: GraphState, validator: ValidatorAgent) -> GraphState:
+    """
+    Проверяет, можно ли выполнить задачу с текущими инструментами, ПЕРЕД ее запуском.
+    """
+    print("\n--- Узел: Tool Validator ---")
+    task = state.get('current_task')
+    if not task: return state
+
+    report = validator.execute(task)
+    state.setdefault('node_outputs', {})['validation_report'] = report
+    return state
+
 
 def task_executor_node(state: GraphState, agents: dict) -> GraphState:
     """
@@ -155,26 +168,30 @@ def reflection_node(state: GraphState, analyst: AnalystAgent, supervisor: Superv
 
 def architect_node(state: GraphState, architect: ArchitectAgent) -> GraphState:
     """
-    Узел для самокоррекции. Сам берет задачу из списка выполненных.
+    Узел для самокоррекции. Работает по новой, проактивной схеме.
     """
     print("\n--- Узел: Architect ---")
     
-    if not state['completed_tasks']:
-        print("!!! [ArchitectNode] КРИТИЧЕСКАЯ ОШИБКА: Нет задач в списке выполненных для анализа.")
+    task_to_fix = state.get('current_task')
+    validation_report = state.get('node_outputs', {}).get('validation_report')
+
+    if not task_to_fix or not validation_report:
+        print("!!! [ArchitectNode] КРИТИЧЕСКАЯ ОШИБКА: Нет текущей задачи или отчета валидатора для работы.")
         state.setdefault('node_outputs', {})['architect_status'] = 'FATAL_ERROR'
+        # Помещаем "сломанную" задачу в выполненные, чтобы не потерять историю
+        if task_to_fix:
+            task_to_fix['status'] = 'FATAL_ERROR'
+            state['completed_tasks'].append(task_to_fix)
         return state
 
-    # ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: Архитектор сам берет последнюю проваленную задачу.
-    task_to_fix = state['completed_tasks'].pop()
     print(f"   [ArchitectNode] Взял на исправление задачу: {task_to_fix.get('task_id')}")
-
-    error = state.get('error_message', 'Нет деталей')
-    remediated_task = architect.fix_or_enhance(task_to_fix, error)
     
-    if remediated_task == task_to_fix:
+    remediated_task = architect.fix_or_enhance(task_to_fix, validation_report)
+    
+    if remediated_task.get('status') == 'FATAL_ERROR':
         print("   [ArchitectNode] <- Архитектор не смог внести исправления. Сигнализирую о фатальной ошибке.")
         state.setdefault('node_outputs', {})['architect_status'] = 'FATAL_ERROR'
-        state['completed_tasks'].append(task_to_fix) # Возвращаем задачу, чтобы не терять историю
+        state['completed_tasks'].append(remediated_task)
     else:
         print(f"   [ArchitectNode] <- Задача {task_to_fix['task_id']} исправлена и возвращена в очередь.")
         state['task_queue'].insert(0, remediated_task)
@@ -311,6 +328,19 @@ def escalation_router(state: GraphState) -> str:
     state['task_queue'].insert(0, failed_task)
     return "fetcher"
 
+def validation_router(state: GraphState) -> str:
+    """
+    Направляет поток выполнения на основе отчета от ValidatorAgent.
+    """
+    print("\n--- Узел: Validation Router ---")
+    report = state.get('node_outputs', {}).get('validation_report', {})
+    if report.get('is_executable'):
+        print("   [ValidationRouter] -> Задача выполнима. Передаю исполнителю.")
+        return "executor"
+    else:
+        print("   [ValidationRouter] -> Недостаточно инструментов. Передаю архитектору.")
+        return "architect"
+
 # --- НОВЫЙ МАРШРУТИЗАТОР ДЛЯ "АВАРИЙНОГО ТОРМОЗА" ---
 def architect_router(state: GraphState) -> str:
     """
@@ -402,9 +432,9 @@ def section_writing_router(state: GraphState) -> str:
 def build_graph(agents: dict, output_dir: str):
     workflow = StateGraph(GraphState)
 
-    # 1. Регистрация всех узлов
     workflow.add_node("supervisor", lambda state: supervisor_node(state, agents['Supervisor']))
     workflow.add_node("task_fetcher", task_fetcher_node)
+    workflow.add_node("tool_validator", lambda state: tool_validator_node(state, agents['Validator']))
     workflow.add_node("task_executor", lambda state: task_executor_node(state, agents))
     workflow.add_node("architect", lambda state: architect_node(state, agents['Architect']))
     workflow.add_node("revision", lambda state: revision_node(state, agents['Reviser'], agents['Supervisor']))
@@ -420,12 +450,25 @@ def build_graph(agents: dict, output_dir: str):
     workflow.add_node("section_writer", lambda state: section_writer_node(state, agents['SectionWriterAgent']))
     workflow.add_node("final_compiler", lambda state: final_compile_node(state, agents['ReportWriter'], output_dir))
 
-    # 2. Построение логики графа
     workflow.set_entry_point("supervisor")
     workflow.add_edge("supervisor", "task_fetcher")
-    workflow.add_edge("task_fetcher", "task_executor")
-
-    workflow.add_conditional_edges("task_executor", escalation_router, {"fetcher": "task_fetcher", "revision": "revision", "architect": "architect"})
+    
+    workflow.add_edge("task_fetcher", "tool_validator")
+    workflow.add_conditional_edges("tool_validator", validation_router, {
+        "executor": "task_executor",
+        "architect": "architect",
+        END: END
+    })
+    
+    # === ИЗМЕНЕНИЕ НАЧАТО: Восстановлен путь к архитектору ===
+    workflow.add_conditional_edges("task_executor", escalation_router, {
+        "fetcher": "task_fetcher", 
+        "revision": "revision",
+        "architect": "architect", # <--- ВОТ ЭТОТ ПУТЬ БЫЛ ПОТЕРЯН
+        END: END
+    })
+    # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
+    
     workflow.add_conditional_edges("architect", architect_router, {
         "fetcher": "task_fetcher",
         END: END
@@ -444,6 +487,7 @@ def build_graph(agents: dict, output_dir: str):
     workflow.add_edge("final_compiler", END)
 
     return workflow.compile()
+
 
 # ====================================================================================
 # === 4. ФУНКЦИЯ ЗАПУСКА ГРАФА =======================================================

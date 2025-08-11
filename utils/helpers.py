@@ -73,7 +73,7 @@ def invoke_llm_for_json_with_retry(
         current_prompt = prompt_with_instructions
         current_model = model_name
 
-        if attempt == 1: # Вторая попытка: просим ту же модель исправить себя
+        if attempt == 1:
             print("      [JSON Invoker] Стратегия 2: Самокоррекция.")
             current_prompt = f"""Твой предыдущий ответ не удалось распарсить.
 Вот твой невалидный ответ:
@@ -84,7 +84,7 @@ def invoke_llm_for_json_with_retry(
 Оригинальные инструкции по формату:
 {parser.get_format_instructions()}
 """
-        elif attempt == 2: # Третья попытка: эскалация на "санитарную" модель
+        elif attempt == 2:
             print(f"      [JSON Invoker] Стратегия 3: Эскалация на санитарную модель '{sanitizer_model_name}'.")
             current_model = sanitizer_model_name
             current_prompt = f"""Извлеки валидный JSON объект из текста ниже. Верни ТОЛЬКО сам JSON и ничего больше.
@@ -105,10 +105,12 @@ def invoke_llm_for_json_with_retry(
         except (ValidationError, json.JSONDecodeError) as e:
             print(f"      [JSON Invoker] !!! Ошибка валидации/парсинга на попытке {attempt + 1}: {e}")
             time.sleep(2)
-        except Exception as e:
-            print(f"      [JSON Invoker] !!! Критическая ошибка API на попытке {attempt + 1}: {e}")
-            # При ошибках API (например, лимиты) нет смысла продолжать
-            return {}
+        # === ИЗМЕНЕНИЕ НАЧАТО ===
+        # Мы больше не ловим 'Exception as e' здесь.
+        # Любая другая ошибка (API, сеть, лимиты) теперь не будет "заглушена",
+        # а будет выброшена наверх, где ее поймает и корректно залогирует
+        # узел 'task_executor_node' в 'orchestrator.py'.
+        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
 
     print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось получить валидный JSON после {max_retries} попыток.")
     return {}

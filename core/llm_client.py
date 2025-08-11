@@ -1,4 +1,6 @@
 # core/llm_client.py
+import sys
+import traceback
 from langchain_google_genai import ChatGoogleGenerativeAI
 from core.budget_manager import APIBudgetManager
 
@@ -41,30 +43,37 @@ class LLMClient:
             
         print(f"   [LLMClient] -> Вызов модели Уровня '{self.get_level(model_name)}': {model_name}")
         
+        # === ИЗМЕНЕНИЕ НАЧАТО: Полное логирование промпта ===
+        print("\n" + "-"*25 + " НАЧАЛО ПРОМПТА " + "-"*25)
+        print(prompt)
+        print("-" * 25 + " КОНЕЦ ПРОМПТА " + "-"*27 + "\n")
+        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
+
         instance = self._get_model_instance(model_name)
         
         try:
             response = instance.invoke(prompt)
             
-            # --- НОВОЕ ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ ОТВЕТА ---
             if not response or not hasattr(response, 'content') or not response.content:
                 print("\n" + "="*80)
                 print(f"!!! [LLMClient] ВНИМАНИЕ: Получен ПУСТОЙ или НЕКОРРЕКТНЫЙ ответ от модели '{model_name}'.")
                 print(f"    Сырой ответ: {response}")
                 print("="*80 + "\n")
-                # Мы не вызываем исключение, чтобы позволить агенту обработать пустой ответ,
-                # но мы оставляем четкий след в логах.
             
             self.budget_manager.record_spend(model_name)
             return response
         except Exception as e:
+            error_details = "Дополнительные детали не найдены."
+            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+                error_details = f"Детали ответа API: {e.response.text}"
+
             print("\n" + "="*80)
             print(f"!!! [LLMClient] КРИТИЧЕСКАЯ ОШИБКА при вызове API для модели '{model_name}'.")
             print(f"    Тип ошибки: {type(e).__name__}")
             print(f"    Сообщение об ошибке: {e}")
-            import traceback
+            print(f"    Дополнительно: {error_details}")
             print("    Трассировка стека:")
-            traceback.print_exc()
+            traceback.print_exc(file=sys.stderr)
             print("="*80 + "\n")
             raise e
 

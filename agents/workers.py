@@ -1,6 +1,9 @@
 # agents/workers.py
 import json
 from datetime import datetime, timezone
+import re
+import sys
+import traceback
 from typing import Dict
 from agents.base_agent import BaseAgent
 from utils.helpers import invoke_llm_for_json_with_retry
@@ -20,63 +23,100 @@ class BaseResearchAgent(BaseAgent):
     def execute(self, task: dict, model_name: str, user_config: Dict) -> list:
         """
         Выполняет задачу, используя цикл ReAct и зная общую цель проекта.
+        Теперь с полным логированием ошибок.
         """
-        print(f"   [{self.__class__.__name__}] -> Задача '{task['task_id']}' (ReAct) на модели {model_name}...")
-        
-        if not self.tool_registry:
-            raise ValueError("ToolRegistry не был предоставлен этому агенту.")
+        # === ИЗМЕНЕНИЕ НАЧАТО: Глобальный блок try...except для всего метода ===
+        try:
+            print(f"   [{self.__class__.__name__}] -> Задача '{task['task_id']}' (ReAct) на модели {model_name}...")
+            
+            if not self.tool_registry:
+                raise ValueError("ToolRegistry не был предоставлен этому агенту.")
 
-        main_goal = user_config.get("user_context", {}).get("main_goal", "Цель не определена.")
-        visited_urls_str = json.dumps(user_config.get('visited_urls', []), indent=2)
-        high_level_context = f"**КОНТЕКСТ ВСЕГО ПРОЕКТА:**\nТы работаешь над достижением следующей главной цели: '{main_goal}'.\n\n**УЖЕ ПОСЕЩЕННЫЕ URL (не используй их повторно):**\n{visited_urls_str}"
-        available_tools = self.tool_registry.get_tools_for_prompt()
-        initial_prompt = f"{self.role_prompt}\n{high_level_context}\n\n**ТВОЯ ТЕКУЩАЯ ЗАДАЧА:** '{task['description']}'\n\n**ПРОЦЕСС РАБОТЫ (ReAct):**...\n**СПИСОК ИНСТРУМЕНТОВ:**\n{available_tools}\n\n**ФОРМАТ ВЫВОДА ДЛЯ ДЕЙСТВИЯ:**..."
-        
-        conversation_history = [initial_prompt]
-        max_turns = 5
-        
-        for i in range(max_turns):
-            print(f"      [ReAct] Итерация {i+1}/{max_turns}...")
-            full_prompt = "\n".join(conversation_history)
-            response = self.llm_client.invoke(model_name, full_prompt)
+            main_goal = user_config.get("user_context", {}).get("main_goal", "Цель не определена.")
+            visited_urls_str = json.dumps(user_config.get('visited_urls', []), indent=2)
             
-            # --- НОВОЕ УСТОЙЧИВОЕ ЛОГИРОВАНИЕ И ПАРСИНГ ---
-            raw_content = response.content if hasattr(response, 'content') else ""
-            conversation_history.append(raw_content)
+            plan_guidance = ""
+            validation_report = user_config.get('node_outputs', {}).get('validation_report', {})
+            suggested_plan = validation_report.get('suggested_plan')
             
-            try:
-                # Пытаемся найти и распарсить JSON
-                json_part_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
-                if not json_part_match:
-                    raise ValueError("JSON-объект не найден в ответе модели.")
+            if suggested_plan:
+                plan_str = "\n".join(f"- {step}" for step in suggested_plan)
+                plan_guidance = f"\n**РЕКОМЕНДУЕМЫЙ ПЛАН ДЕЙСТВИЙ (предоставлен валидатором):**\n{plan_str}\nСледуй этому плану для достижения цели."
+                print(f"      [ReAct] Обнаружен предложенный план. Включаю в промпт.")
+
+            high_level_context = f"**КОНТЕКСТ ВСЕГО ПРОЕКТА:**\nТы работаешь над достижением следующей главной цели: '{main_goal}'.\n\n**УЖЕ ПОСЕЩЕННЫЕ URL (не используй их повторно):**\n{visited_urls_str}"
+            available_tools = self.tool_registry.get_tools_for_prompt()
+            
+            initial_prompt = f"{self.role_prompt}\n{high_level_context}\n\n**ТВОЯ ТЕКУЩАЯ ЗАДАЧА:** '{task['description']}'\n{plan_guidance}\n\n**ПРОЦЕСС РАБОТЫ (ReAct):**...\n**СПИСОК ИНСТРУМЕНТОВ:**\n{available_tools}\n\n**ФОРМАТ ВЫВОДА ДЛЯ ДЕЙСТВИЯ:**..."
+            
+            conversation_history = [initial_prompt]
+            max_turns = 7
+            
+            for i in range(max_turns):
+                print(f"      [ReAct] Итерация {i+1}/{max_turns}...")
+                full_prompt = "\n".join(conversation_history)
+                response = self.llm_client.invoke(model_name, full_prompt)
                 
-                action_data = json.loads(json_part_match.group(0))
+                raw_content = response.content if hasattr(response, 'content') else ""
+                conversation_history.append(raw_content)
+                
+                try:
+                    json_part_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
+                    if not json_part_match:
+                        raise ValueError("JSON-объект не найден в ответе модели.")
+                    
+                    action_data = json.loads(json_part_match.group(0))
 
-                if "tool_to_use" in action_data:
-                    tool_call = action_data["tool_to_use"]
-                    tool_result = self.tool_registry.use_tool(tool_call.get("tool_name"), tool_call.get("args", {}), user_config)
-                    observation = f"OBSERVATION:\n```\n{str(tool_result)[:3000]}\n```"
-                    conversation_history.append(observation)
-                elif "finish" in action_data:
-                    break
-                else: 
-                    raise ValueError("Неверный формат JSON-действия (отсутствуют ключи 'tool_to_use' или 'finish').")
-            except Exception as e:
-                print("\n" + "-"*80)
-                print(f"!!! [ReAct Parser] ОШИБКА парсинга ответа от модели '{model_name}'.")
-                print(f"    Тип ошибки: {type(e).__name__} - {e}")
-                print(f"    Сырой ответ модели, который не удалось распарсить:\n{raw_content}")
-                print("-"*80 + "\n")
-                conversation_history.append(f"OBSERVATION: Ошибка обработки ответа: {e}. Пожалуйста, верни JSON с ключом 'tool_to_use' или 'finish'.")
+                    if "tool_to_use" in action_data:
+                        tool_call = action_data["tool_to_use"]
+                        tool_result = self.tool_registry.use_tool(tool_call.get("tool_name"), tool_call.get("args", {}), user_config)
+                        observation = f"OBSERVATION:\n```\n{str(tool_result)[:3000]}\n```"
+                        conversation_history.append(observation)
+                    elif "finish" in action_data:
+                        print("      [ReAct] Агент решил, что задача выполнена. Завершаю цикл.")
+                        break
+                    else: 
+                        raise ValueError("Неверный формат JSON-действия (отсутствуют ключи 'tool_to_use' или 'finish').")
+                except Exception as e_inner:
+                    error_message = (
+                        f"!!! [ReAct ВНУТРЕННИЙ СБОЙ] Итерация {i+1}/{max_turns}. Агент не смог обработать ответ LLM.\n"
+                        f"    Модель: {model_name}\n"
+                        f"    Тип ошибки: {type(e_inner).__name__} - {e_inner}\n"
+                        f"    --- СЫРОЙ ОТВЕТ МОДЕЛИ ---\n{raw_content}\n--- КОНЕЦ ОТВЕТА ---\n"
+                        "    Продолжаю цикл, сообщив LLM об ошибке."
+                    )
+                    print(error_message, file=sys.stderr)
+                    sys.stderr.flush()
+                    conversation_history.append(f"OBSERVATION: Ошибка обработки твоего предыдущего ответа: {e_inner}. Пожалуйста, верни JSON с ключом 'tool_to_use' или 'finish'.")
 
-        final_synthesis_prompt = f"{self.role_prompt}\nПроанализируй всю переписку и извлеки 3-5 ключевых фактов...\n\n**ИСТОРИЯ РАБОТЫ:**\n{''.join(conversation_history)}"
-        synthesis_model = "gemini-2.5-pro"
-        report = invoke_llm_for_json_with_retry(self.llm_client, synthesis_model, "gemini-2.5-flash", final_synthesis_prompt, FactExtractionReport, self.budget_manager)
+            print("      [ReAct] Цикл завершен. Перехожу к финальному синтезу.")
+            final_synthesis_prompt = f"{self.role_prompt}\nПроанализируй всю переписку и извлеки 3-5 ключевых фактов...\n\n**ИСТОРИЯ РАБОТЫ:**\n{''.join(conversation_history)}"
+            synthesis_model = "gemini-2.5-pro"
+            report = invoke_llm_for_json_with_retry(self.llm_client, synthesis_model, "gemini-2.5-flash", final_synthesis_prompt, FactExtractionReport, self.budget_manager)
 
-        if not report or 'extracted_facts' not in report: return []
-        for fact in report['extracted_facts']: fact['created_at'] = datetime.now(timezone.utc).isoformat()
-        return report['extracted_facts']
+            if not report or 'extracted_facts' not in report:
+                # Если синтез не дал результатов, это не ошибка, а пустой результат.
+                print("      [ReAct] Синтез не дал результатов. Возвращаю пустой список.")
+                return []
 
+            for fact in report['extracted_facts']: fact['created_at'] = datetime.now(timezone.utc).isoformat()
+            return report['extracted_facts']
+
+        except Exception as e:
+            # Этот блок поймает ЛЮБУЮ ошибку внутри метода execute
+            print("\n" + "="*80, file=sys.stderr)
+            print(f"!!! КРИТИЧЕСКИЙ СБОЙ ВНУТРИ АГЕНТА '{self.__class__.__name__}'", file=sys.stderr)
+            print(f"    Задача: {task.get('task_id')}", file=sys.stderr)
+            print(f"    Модель: {model_name}", file=sys.stderr)
+            print(f"    Тип ошибки: {type(e).__name__}", file=sys.stderr)
+            print(f"    Сообщение: {e}", file=sys.stderr)
+            print("    --- ТРАССИРОВКА СТЕКА ---", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            print("    --------------------------", file=sys.stderr)
+            print("="*80 + "\n", file=sys.stderr)
+            sys.stderr.flush()
+            raise e # Пробрасываем ошибку дальше, чтобы Task Executor мог ее поймать
+    
 class ResearcherAgent(BaseResearchAgent):
     role_prompt: str = "Твоя роль: Ассистент-исследователь. Твоя цель — найти подтверждающие, основные факты по задаче."
 

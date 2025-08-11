@@ -1,7 +1,19 @@
 # agents/models.py
 from pydantic import BaseModel, Field
-from typing import List, Dict, Literal
+from typing import List, Dict, Literal, Optional
 
+
+class ValidationReport(BaseModel):
+    """
+    Структурированный отчет от ValidatorAgent.
+    Определяет, можно ли выполнить задачу и как именно.
+    """
+    is_executable: bool = Field(description="True, если задача полностью выполнима с помощью предоставленных инструментов.")
+    reasoning: str = Field(description="Краткое объяснение, почему задача выполнима или невыполнима.")
+    missing_tool_description: Optional[str] = Field(default=None, description="Если is_executable=false, здесь должно быть четкое описание того, какой инструмент необходимо создать.")
+    # === ИЗМЕНЕНИЕ НАЧАТО: Добавлено поле для плана ===
+    suggested_plan: Optional[List[str]] = Field(default=None, description="Если задача сложная, но выполнимая, здесь должен быть пошаговый план для исполнителя.")
+    
 # --- Модель для Базы Знаний ---
 class KnowledgeUnit(BaseModel):
     """
