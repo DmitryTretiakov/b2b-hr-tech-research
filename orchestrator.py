@@ -79,8 +79,11 @@ def task_executor_node(state: GraphState, agents: dict) -> GraphState:
         try:
             result = agent.execute(task, model, state.copy())
             
-            # Пустой результат от agent.execute() означает, что произошла неустранимая ошибка
-            # (например, API), которая уже была залогирована в invoke_llm_for_json_with_retry
+            print("\n" + "-"*25 + " НАЧАЛО ОТВЕТА АГЕНТА " + "-"*25)
+            print(f"Сырой результат от агента '{agent_name}':")
+            print(result)
+            print("-" * 25 + " КОНЕЦ ОТВЕТА АГЕНТА " + "-"*27 + "\n")
+
             if not result:
                 task['status'] = 'FAILURE'
                 state['error_message'] = "Агент не вернул результат. Вероятная причина - ошибка API или внутренняя ошибка агента. См. лог выше."

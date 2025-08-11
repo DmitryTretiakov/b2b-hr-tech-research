@@ -29,35 +29,47 @@ class SupervisorAgent(BaseAgent):
         """
         model_name = "gemini-2.5-pro"
         
-        config_str = yaml.dump(user_config, allow_unicode=True, sort_keys=False)
-
+        # === ИЗМЕНЕНИЕ НАЧАТО: Упрощение промпта для повышения надежности ===
+        # Вместо передачи всего конфига, передаем только ключевые секции.
+        context_summary = {
+            "main_goal": user_config.get("user_context", {}).get("main_goal"),
+            "product_vision": user_config.get("project_context", {}).get("product_vision"),
+            "initial_hypotheses": user_config.get("initial_hypotheses", {}).get("tsu_assets_analysis"),
+            "additional_tasks": user_config.get("initial_hypotheses", {}).get("additional_tasks")
+        }
+        context_str = yaml.dump(context_summary, allow_unicode=True, sort_keys=False, indent=2)
+        
+        allowed_research_models = "'gemma-3', 'gemini-2.5-flash-lite', 'gemini-2.5-flash'"
+        
         prompt = f"""
-**ТВОЯ РОЛЬ:** Ты - Ведущий Стратегический Аналитик и AI Product Owner. Твоя задача - создать исчерпывающий, но ресурсоэффективный план исследования и генерации артефактов на основе предоставленного брифа.
+**ТВОЯ РОЛЬ:** Ведущий Стратегический Аналитик.
 
-**ПОЛНЫЙ КОНТЕКСТ ПРОЕКТА (BRIEF):**
+**КЛЮЧЕВЫЕ ДАННЫЕ ПРОЕКТА:**
 ```yaml
-{json.dumps(user_config, ensure_ascii=False, indent=2)}
-```
+{context_str}```
 
-**ТВОЯ ЗАДАЧА СОСТОИТ ИЗ ТРЕХ ЧАСТЕЙ:**
+**ТВОЯ ЗАДАЧА:** Создать детальный план действий в формате JSON.
 
-**1. ВЕРИФИКАЦИЯ И ИССЛЕДОВАНИЕ (Принцип "Не Доверяй, а Проверяй"):**
-   - Проанализируй `initial_hypotheses` и `additional_tasks`.
-   - Для **каждой** задачи по сбору информации (верификация гипотез, поиск данных) создай задачу для **`SingleStepToolAgent`**. Этот агент прост и надежен, он выберет лучший инструмент и выполнит одно действие.
+**ИНСТРУКЦИИ ПО ВЫПОЛНЕНИЮ (два шага):**
 
-**2. ПЛАНИРОВАНИЕ АРТЕФАКТОВ (Финальный Синтез):**
-   - Проанализируй `project_context.product_vision` и `main_goal` на предмет требований к созданию конкретных бизнес-артефактов.
-   - Если требуется **финансовая модель**, создай задачу для `FinancialModelAgent`.
-   - Если требуется **дорожная карта или User Stories**, создай задачу для `ProductManagerAgent`.
+**ШАГ 1: Продумай план (Твои мысли).**
+Проанализируй ключевые данные и в свободной форме, как для себя, набросай список всех необходимых задач. Раздели их на две категории:
+1.  **Задачи по сбору данных:** Верификация гипотез и выполнение дополнительных задач. Для них будет использоваться `SingleStepToolAgent`.
+2.  **Задачи по созданию артефактов:** Создание финансовой модели (`FinancialModelAgent`) или дорожной карты (`ProductManagerAgent`).
 
-**ПРАВИЛА ФОРМИРОВАНИЯ ПЛАНА:**
-- **ID Задач:** Используй префиксы: `verify_` для верификации, `research_` для исследования и `artifact_` для генерации артефактов.
-- **Агенты:** Четко указывай `agent_name` (`SingleStepToolAgent`, `FinancialModelAgent`, `ProductManagerAgent`).
-- **Ресурсоэффективность:** Для **ВСЕХ** задач в `initial_model_assignments` назначь самую дешевую подходящую модель: `'gemma-3'` для задач `SingleStepToolAgent` и `'gemini-2.5-flash'` для задач по созданию артефактов.
+**ШАГ 2: Отформатируй план в JSON.**
+После того как ты продумал план, отформатируй его в виде ОДНОГО JSON-объекта, который строго соответствует схеме `GraphPlan`.
+- Для каждой задачи из Шага 1 создай объект в списке `tasks` с `agent_name: "SingleStepToolAgent"`.
+- Для каждой задачи по созданию артефактов создай соответствующий объект (`agent_name: "FinancialModelAgent"` и т.д.).
+- Присвой каждой задаче уникальный `task_id` с префиксами `verify_`, `research_` или `artifact_`.
+- Заполни словарь `initial_model_assignments`: для `SingleStepToolAgent` используй 'gemma-3', для остальных - 'gemini-2.5-flash'.
 
-**ФОРМАТ ВЫВОДА:**
-Верни результат в виде ОДНОГО JSON-объекта, соответствующего схеме `GraphPlan`.
+**Пример твоих мыслей (Шаг 1):**
+"Окей, мне нужно проверить гипотезу о синергии - это будет задача для SingleStepToolAgent. Затем нужно найти зарплаты - еще одна задача для него. И, наконец, создать фин. модель - это для FinancialModelAgent."
+
+**Финальный результат (Шаг 2) должен быть ТОЛЬКО JSON-объектом.**
 """
+        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
 
         print("   [SupervisorAgent] -> Генерирую контекстно-осознанный план графа...")
         plan_data = invoke_llm_for_json_with_retry(
@@ -68,8 +80,17 @@ class SupervisorAgent(BaseAgent):
             pydantic_schema=GraphPlan,
             budget_manager=self.budget_manager
         )
+        
+        # === ИЗМЕНЕНИЕ НАЧАТО: Добавлен финальный предохранитель ===
+        if not plan_data or not plan_data.get('tasks'):
+            error_msg = "КРИТИЧЕСКАЯ ОШИБКА: SupervisorAgent не смог сгенерировать валидный план задач после всех попыток. Выполнение невозможно."
+            print(f"   [SupervisorAgent] !!! {error_msg}")
+            raise ValueError(error_msg)
+        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
+            
         print("   [SupervisorAgent] <- План графа успешно сгенерирован.")
-        return plan_data if plan_data else {"tasks": [], "initial_model_assignments": {}}
+        return plan_data
+
 
     def create_next_phase_plan(self, analysis_summary: dict) -> Dict:
         """Генерирует план для следующей фазы на основе анализа предыдущей."""

@@ -34,7 +34,7 @@ class LLMClient:
 
     def invoke(self, model_name: str, prompt: str):
         """
-        Выполняет вызов к указанной модели с контролем бюджета и детальным логированием ошибок и ответов.
+        Выполняет вызов к указанной модели с контролем бюджета и агрессивным логированием ошибок.
         """
         if not self.budget_manager.can_i_spend(model_name):
             error_message = f"Дневной лимит для модели {model_name} исчерпан."
@@ -43,39 +43,43 @@ class LLMClient:
             
         print(f"   [LLMClient] -> Вызов модели Уровня '{self.get_level(model_name)}': {model_name}")
         
-        # === ИЗМЕНЕНИЕ НАЧАТО: Полное логирование промпта ===
-        print("\n" + "-"*25 + " НАЧАЛО ПРОМПТА " + "-"*25)
-        print(prompt)
-        print("-" * 25 + " КОНЕЦ ПРОМПТА " + "-"*27 + "\n")
-        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
-
         instance = self._get_model_instance(model_name)
         
+        # === ИЗМЕНЕНИЕ НАЧАТО: Добавлен агрессивный блок обработки ошибок API ===
         try:
             response = instance.invoke(prompt)
             
-            if not response or not hasattr(response, 'content') or not response.content:
-                print("\n" + "="*80)
-                print(f"!!! [LLMClient] ВНИМАНИЕ: Получен ПУСТОЙ или НЕКОРРЕКТНЫЙ ответ от модели '{model_name}'.")
-                print(f"    Сырой ответ: {response}")
-                print("="*80 + "\n")
+            # Принцип "Fail Loudly": пустой ответ от API - это критическая ошибка.
+            if not response or not hasattr(response, 'content') or not response.content.strip():
+                print("\n" + "="*80, file=sys.stderr)
+                print(f"!!! [LLMClient] КРИТИЧЕСКАЯ ОШИБКА: Получен ПУСТОЙ или НЕКОРРЕКТНЫЙ ответ от модели '{model_name}'.", file=sys.stderr)
+                print(f"    Сырой ответ: {response}", file=sys.stderr)
+                print("="*80 + "\n", file=sys.stderr)
+                sys.stderr.flush()
+                # Генерируем исключение, чтобы остановить выполнение и показать проблему.
+                raise ValueError(f"API для модели '{model_name}' вернул пустой ответ. Проверьте права доступа и квоты в Google Cloud.")
             
             self.budget_manager.record_spend(model_name)
             return response
+            
         except Exception as e:
             error_details = "Дополнительные детали не найдены."
+            # Попытка извлечь более детальную информацию из исключения, если она есть
             if hasattr(e, 'response') and hasattr(e.response, 'text'):
                 error_details = f"Детали ответа API: {e.response.text}"
 
-            print("\n" + "="*80)
-            print(f"!!! [LLMClient] КРИТИЧЕСКАЯ ОШИБКА при вызове API для модели '{model_name}'.")
-            print(f"    Тип ошибки: {type(e).__name__}")
-            print(f"    Сообщение об ошибке: {e}")
-            print(f"    Дополнительно: {error_details}")
-            print("    Трассировка стека:")
+            print("\n" + "="*80, file=sys.stderr)
+            print(f"!!! [LLMClient] КРИТИЧЕСКАЯ ОШИБКА при вызове API для модели '{model_name}'.", file=sys.stderr)
+            print(f"    Тип ошибки: {type(e).__name__}", file=sys.stderr)
+            print(f"    Сообщение об ошибке: {e}", file=sys.stderr)
+            print(f"    Дополнительно: {error_details}", file=sys.stderr)
+            print("    Трассировка стека:", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
-            print("="*80 + "\n")
+            print("="*80 + "\n", file=sys.stderr)
+            sys.stderr.flush()
+            # Пробрасываем исключение дальше, чтобы система могла его обработать.
             raise e
+        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
 
     def get_level(self, model_name: str) -> int:
         """Возвращает уровень иерархии для модели."""

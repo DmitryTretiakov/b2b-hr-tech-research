@@ -20,9 +20,9 @@ from agents.workers import (
     ResearcherAgent, ContrarianAgent, QualityAssessorAgent, FixerAgent, 
     AnalystAgent, ReportWriterAgent, SanityCheckCritic,
     FinancialModelAgent, ProductManagerAgent, ReviserAgent,
-    OutlineAgent, SectionWriterAgent
+    OutlineAgent, SectionWriterAgent, SingleStepToolAgent
 )
-
+from tools.diagnostics import probe_google_api
 # --- Константы ---
 OUTPUT_DIR = "output"
 STATE_FILE = os.path.join(OUTPUT_DIR, "graph_state.json")
@@ -31,6 +31,49 @@ API_LIMITS = {
     "gemini-2.5-pro": 100, "gemini-2.5-flash": 250, "gemini-2.5-flash-lite": 1000,
     "gemma-3": 14400, "gemma-3n": 14400, "gemini-embedding-001": 1000,
 }
+def run_pre_flight_checks():
+    """
+    Выполняет серию диагностических тестов перед запуском основного графа.
+    """
+    print("\n--- ЗАПУСК ПРЕДПОЛЕТНОЙ ПРОВЕРКИ API ---")
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        print("!!! КРИТИЧЕСКАЯ ОШИБКА: GOOGLE_API_KEY не найден в .env файле. Проверка невозможна.")
+        return False
+
+    # Модели, которые мы хотим проверить. Pro - критически важна. Flash - для сравнения.
+    models_to_probe = ["gemini-2.5-pro", "gemini-2.5-flash"]
+    all_checks_passed = True
+
+    for model in models_to_probe:
+        print("\n" + "="*30 + f" ПРОВЕРКА МОДЕЛИ: {model} " + "="*30)
+        result = probe_google_api(model, api_key)
+        
+        print(f"  - Статус запроса: {result['status']}")
+        print(f"  - HTTP Статус-код: {result['http_status_code']}")
+        
+        # Выводим тело ответа в удобном формате
+        print("  - Тело ответа:")
+        if isinstance(result['response_body'], dict):
+            print(json.dumps(result['response_body'], indent=2, ensure_ascii=False))
+        else:
+            print(result['response_body'])
+            
+        if result['error_message']:
+            print(f"  - Сообщение об ошибке: {result['error_message']}")
+
+        # Критическая проверка для основной модели
+        if model == "gemini-2.5-pro" and result['http_status_code'] != 200:
+            all_checks_passed = False
+            print("\n!!! КРИТИЧЕСКИЙ СБОЙ ПРОВЕРКИ! Основная модель 'gemini-2.5-pro' недоступна.")
+            print("    Возможные причины:")
+            print("    1. Неверный GOOGLE_API_KEY.")
+            print("    2. Vertex AI API / Generative Language API не активирован в вашем проекте Google Cloud.")
+            print("    3. К проекту Google Cloud не привязан платежный аккаунт.")
+            print("    4. Исчерпаны квоты или лимиты для данной модели.")
+
+    print("\n--- ПРЕДПОЛЕТНАЯ ПРОВЕРКА ЗАВЕРШЕНА ---\n")
+    return all_checks_passed
 
 def main():
     # --- 1. Загрузка конфигурации и настройка окружения ---
@@ -52,20 +95,21 @@ def main():
     llm_client = LLMClient(budget_manager)
     tool_registry = ToolRegistry(generated_tools_dir="tools/generated")
 
-    # --- 2.1. Инициализация Агентов ---
-    toolsmith = ToolSmithAgent(llm_client, budget_manager)
-    
-    # === ИЗМЕНЕНИЕ НАЧАТО: Создаем экземпляр ValidatorAgent ===
-    validator = ValidatorAgent(llm_client, budget_manager, tool_registry)
+    # === ИЗМЕНЕНИЕ НАЧАТО: Запуск предполетной проверки ===
+    if not run_pre_flight_checks():
+        print("!!! Предполетная проверка провалена. Запуск основного графа отменен.")
+        exit(1) # Завершаем выполнение с кодом ошибки
     # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
 
+    # --- 2.1. Инициализация Агентов ---
+    toolsmith = ToolSmithAgent(llm_client, budget_manager)
+    validator = ValidatorAgent(llm_client, budget_manager, tool_registry)
     architect = ArchitectAgent(llm_client, budget_manager, tool_registry, toolsmith)
     
     agents = {
         "Supervisor": SupervisorAgent(llm_client, budget_manager),
         "Reviser": ReviserAgent(llm_client, budget_manager),
-        "Researcher": ResearcherAgent(llm_client, budget_manager, tool_registry),
-        "Contrarian": ContrarianAgent(llm_client, budget_manager, tool_registry),
+        "SingleStepToolAgent": SingleStepToolAgent(llm_client, budget_manager, tool_registry),
         "QualityAssessor": QualityAssessorAgent(llm_client, budget_manager),
         "Fixer": FixerAgent(llm_client, budget_manager),
         "SanityCheckCritic": SanityCheckCritic(llm_client, budget_manager),
@@ -77,9 +121,7 @@ def main():
         "FinancialModelAgent": FinancialModelAgent(llm_client, budget_manager),
         "ProductManagerAgent": ProductManagerAgent(llm_client, budget_manager),
         "Architect": architect,
-        # === ИЗМЕНЕНИЕ НАЧАТО: Добавляем валидатора в словарь ===
         "Validator": validator
-        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
     }
 
     # --- 3. Сборка графа и определение начального состояния ---
