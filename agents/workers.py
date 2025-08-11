@@ -1,122 +1,194 @@
 # agents/workers.py
 import json
-from datetime import datetime, timezone
-import re
 import sys
 import traceback
-from typing import Dict
+from datetime import datetime, timezone
+from typing import Dict, List
+from pydantic import BaseModel, Field
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain_core.prompts import PromptTemplate
 from agents.base_agent import BaseAgent
 from utils.helpers import invoke_llm_for_json_with_retry
 from agents.models import (
     FactExtractionReport, BatchQualityAssessmentReport, AnalystReport, 
     FinalReport, FinalAnalysisReport, RevisionReport, SanityCheckReport,
     FinancialModelArtifact, UserStoryArtifact,
-    ReportOutline, ReportSection # <-- ДОБАВИТЬ
+    ReportOutline, ReportSection
 )
+
+class ToolChoice(BaseModel):
+    """Модель для выбора одного инструмента и его аргументов."""
+    thought: str = Field(description="Краткое объяснение, почему выбран именно этот инструмент.")
+    tool_name: str = Field(description="Название одного инструмента для использования из списка доступных.")
+    args: Dict = Field(description="Словарь с аргументами для вызова выбранного инструмента.")
+
+class SingleStepToolAgent(BaseAgent):
+    """
+    Простой и надежный агент, который выполняет ровно одно действие:
+    1. Выбирает лучший инструмент для задачи.
+    2. Выполняет его.
+    3. Возвращает результат.
+    Идеально подходит для работы с менее мощными моделями.
+    """
+    def execute(self, task: dict, model_name: str, state: dict) -> list:
+        try:
+            print(f"   [SingleStepToolAgent] -> Задача '{task['task_id']}' на модели {model_name}...")
+            if not self.tool_registry:
+                raise ValueError("ToolRegistry не был предоставлен этому агенту.")
+
+            available_tools = self.tool_registry.get_tools_for_prompt()
+            
+            prompt = f"""
+**ТВОЯ РОЛЬ:** Ты - эффективный ассистент. Твоя цель - выбрать ОДИН наиболее подходящий инструмент для выполнения задачи.
+
+**ЗАДАЧА:**
+{task['description']}
+
+**СПИСОК ДОСТУПНЫХ ИНСТРУМЕНТОВ:**
+{available_tools}
+
+**ИНСТРУКЦИИ:**
+1. Проанализируй задачу.
+2. Выбери из списка ОДИН инструмент, который лучше всего подходит для ее решения.
+3. Сформируй необходимые аргументы для этого инструмента.
+4. Верни свой выбор в виде JSON-объекта.
+"""
+            
+            # Шаг 1: LLM выбирает инструмент
+            tool_choice_dict = invoke_llm_for_json_with_retry(
+                self.llm_client, model_name, "gemini-2.5-flash-lite", prompt, ToolChoice, self.budget_manager
+            )
+
+            if not tool_choice_dict:
+                print("      [SingleStepToolAgent] !!! Не удалось получить выбор инструмента от LLM.")
+                return []
+
+            print(f"      [SingleStepToolAgent] LLM выбрал инструмент: '{tool_choice_dict.get('tool_name')}' с мыслью: '{tool_choice_dict.get('thought')}'")
+
+            # Шаг 2: Выполняем выбранный инструмент
+            tool_name = tool_choice_dict.get('tool_name')
+            tool_args = tool_choice_dict.get('args', {})
+            
+            result = self.tool_registry.use_tool(tool_name, tool_args, state)
+            
+            # Шаг 3: Форматируем результат как факт
+            fact = {
+                "claim_id": f"fact_{task['task_id']}",
+                "statement": f"Результат выполнения задачи '{task['description']}': {json.dumps(result, ensure_ascii=False)}",
+                "version": 1,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "status": "ACTIVE",
+                "source_link": f"tool://{tool_name}",
+                "source_quote": json.dumps(tool_args, ensure_ascii=False)
+            }
+            return [fact]
+
+        except Exception as e:
+            print("\n" + "="*80, file=sys.stderr)
+            print(f"!!! КРИТИЧЕСКИЙ СБОЙ ВНУТРИ АГЕНТА '{self.__class__.__name__}'", file=sys.stderr)
+            print(f"    Задача: {task.get('task_id')}", file=sys.stderr)
+            print(f"    Тип ошибки: {type(e).__name__} - {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            print("="*80 + "\n", file=sys.stderr)
+            sys.stderr.flush()
+            return []
 
 class BaseResearchAgent(BaseAgent):
     """
-    Общий базовый класс для Researcher и Contrarian, работающий по циклу ReAct.
+    Общий базовый класс для Researcher и Contrarian, использующий стандартный
+    и надежный AgentExecutor для выполнения цикла ReAct.
     """
     role_prompt: str = "Твоя роль: Ассистент-исследователь."
 
-    def execute(self, task: dict, model_name: str, user_config: Dict) -> list:
+    def execute(self, task: dict, model_name: str, state: dict) -> list:
         """
-        Выполняет задачу, используя цикл ReAct и зная общую цель проекта.
-        Теперь с полным логированием ошибок.
+        Выполняет задачу, используя стандартный AgentExecutor для максимальной надежности.
         """
-        # === ИЗМЕНЕНИЕ НАЧАТО: Глобальный блок try...except для всего метода ===
         try:
             print(f"   [{self.__class__.__name__}] -> Задача '{task['task_id']}' (ReAct) на модели {model_name}...")
             
             if not self.tool_registry:
                 raise ValueError("ToolRegistry не был предоставлен этому агенту.")
 
-            main_goal = user_config.get("user_context", {}).get("main_goal", "Цель не определена.")
-            visited_urls_str = json.dumps(user_config.get('visited_urls', []), indent=2)
+            # Получаем необходимый контекст из состояния
+            main_goal = state.get("user_config", {}).get("user_context", {}).get("main_goal", "Цель не определена.")
+            visited_urls_str = json.dumps(state.get('visited_urls', []), indent=2)
             
-            plan_guidance = ""
-            validation_report = user_config.get('node_outputs', {}).get('validation_report', {})
-            suggested_plan = validation_report.get('suggested_plan')
-            
-            if suggested_plan:
-                plan_str = "\n".join(f"- {step}" for step in suggested_plan)
-                plan_guidance = f"\n**РЕКОМЕНДУЕМЫЙ ПЛАН ДЕЙСТВИЙ (предоставлен валидатором):**\n{plan_str}\nСледуй этому плану для достижения цели."
-                print(f"      [ReAct] Обнаружен предложенный план. Включаю в промпт.")
+            # Формируем промпт, совместимый с create_react_agent
+            template = f"""
+{self.role_prompt}
 
-            high_level_context = f"**КОНТЕКСТ ВСЕГО ПРОЕКТА:**\nТы работаешь над достижением следующей главной цели: '{main_goal}'.\n\n**УЖЕ ПОСЕЩЕННЫЕ URL (не используй их повторно):**\n{visited_urls_str}"
-            available_tools = self.tool_registry.get_tools_for_prompt()
-            
-            initial_prompt = f"{self.role_prompt}\n{high_level_context}\n\n**ТВОЯ ТЕКУЩАЯ ЗАДАЧА:** '{task['description']}'\n{plan_guidance}\n\n**ПРОЦЕСС РАБОТЫ (ReAct):**...\n**СПИСОК ИНСТРУМЕНТОВ:**\n{available_tools}\n\n**ФОРМАТ ВЫВОДА ДЛЯ ДЕЙСТВИЯ:**..."
-            
-            conversation_history = [initial_prompt]
-            max_turns = 7
-            
-            for i in range(max_turns):
-                print(f"      [ReAct] Итерация {i+1}/{max_turns}...")
-                full_prompt = "\n".join(conversation_history)
-                response = self.llm_client.invoke(model_name, full_prompt)
-                
-                raw_content = response.content if hasattr(response, 'content') else ""
-                conversation_history.append(raw_content)
-                
-                try:
-                    json_part_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
-                    if not json_part_match:
-                        raise ValueError("JSON-объект не найден в ответе модели.")
-                    
-                    action_data = json.loads(json_part_match.group(0))
+**КОНТЕКСТ ВСЕГО ПРОЕКТА:**
+Ты работаешь над достижением следующей главной цели: '{main_goal}'.
 
-                    if "tool_to_use" in action_data:
-                        tool_call = action_data["tool_to_use"]
-                        tool_result = self.tool_registry.use_tool(tool_call.get("tool_name"), tool_call.get("args", {}), user_config)
-                        observation = f"OBSERVATION:\n```\n{str(tool_result)[:3000]}\n```"
-                        conversation_history.append(observation)
-                    elif "finish" in action_data:
-                        print("      [ReAct] Агент решил, что задача выполнена. Завершаю цикл.")
-                        break
-                    else: 
-                        raise ValueError("Неверный формат JSON-действия (отсутствуют ключи 'tool_to_use' или 'finish').")
-                except Exception as e_inner:
-                    error_message = (
-                        f"!!! [ReAct ВНУТРЕННИЙ СБОЙ] Итерация {i+1}/{max_turns}. Агент не смог обработать ответ LLM.\n"
-                        f"    Модель: {model_name}\n"
-                        f"    Тип ошибки: {type(e_inner).__name__} - {e_inner}\n"
-                        f"    --- СЫРОЙ ОТВЕТ МОДЕЛИ ---\n{raw_content}\n--- КОНЕЦ ОТВЕТА ---\n"
-                        "    Продолжаю цикл, сообщив LLM об ошибке."
-                    )
-                    print(error_message, file=sys.stderr)
-                    sys.stderr.flush()
-                    conversation_history.append(f"OBSERVATION: Ошибка обработки твоего предыдущего ответа: {e_inner}. Пожалуйста, верни JSON с ключом 'tool_to_use' или 'finish'.")
+**УЖЕ ПОСЕЩЕННЫЕ URL (не используй их повторно):**
+{visited_urls_str}
 
-            print("      [ReAct] Цикл завершен. Перехожу к финальному синтезу.")
-            final_synthesis_prompt = f"{self.role_prompt}\nПроанализируй всю переписку и извлеки 3-5 ключевых фактов...\n\n**ИСТОРИЯ РАБОТЫ:**\n{''.join(conversation_history)}"
-            synthesis_model = "gemini-2.5-pro"
-            report = invoke_llm_for_json_with_retry(self.llm_client, synthesis_model, "gemini-2.5-flash", final_synthesis_prompt, FactExtractionReport, self.budget_manager)
+**ТВОЯ ТЕКУЩАЯ ЗАДАЧА:**
+{{input}}
 
-            if not report or 'extracted_facts' not in report:
-                # Если синтез не дал результатов, это не ошибка, а пустой результат.
-                print("      [ReAct] Синтез не дал результатов. Возвращаю пустой список.")
+**ПРОЦЕСС РАБОТЫ (ReAct):**
+Ты должен отвечать, используя формат JSON. Твой JSON должен содержать либо ключ 'thought' и 'action' для использования инструмента, либо ключ 'thought' и 'final_answer' для завершения работы.
+
+1.  **Thought:** Кратко опиши свой план действий.
+2.  **Action:** Выбери один из доступных инструментов.
+    - `tool_name`: Название инструмента из списка.
+    - `args`: Словарь с аргументами для инструмента.
+3.  **Final Answer:** Когда ты нашел ответ на задачу, предоставь его здесь.
+
+**ДОСТУПНЫЕ ИНСТРУМЕНТЫ:**
+{{tools}}
+
+{{agent_scratchpad}}
+"""
+            prompt = PromptTemplate.from_template(template)
+            llm = self.llm_client._get_model_instance(model_name)
+            tools = list(self.tool_registry.tools.values())
+            
+            # Создаем и конфигурируем стандартный агент
+            agent = create_react_agent(llm, tools, prompt)
+            agent_executor = AgentExecutor(
+                agent=agent, 
+                tools=tools, 
+                verbose=True, 
+                handle_parsing_errors="Пожалуйста, исправь свой предыдущий вывод. Он должен быть валидным JSON с ключами 'action' или 'final_answer'.",
+                max_iterations=7
+            )
+
+            print("      [ReAct] Запускаю стандартный AgentExecutor...")
+            result = agent_executor.invoke({"input": task['description']})
+
+            if not result or 'output' not in result or not result['output']:
+                print("      [ReAct] !!! AgentExecutor завершил работу без финального ответа.")
                 return []
 
-            for fact in report['extracted_facts']: fact['created_at'] = datetime.now(timezone.utc).isoformat()
-            return report['extracted_facts']
+            final_answer = result['output']
+            print(f"      [ReAct] <- AgentExecutor успешно завершен. Финальный ответ: {final_answer[:200]}...")
+
+            # Создаем один факт на основе финального ответа агента
+            # В более сложных сценариях здесь может быть вызов LLM для парсинга ответа на несколько фактов
+            fact = {
+                "claim_id": f"fact_{task['task_id']}",
+                "statement": final_answer,
+                "version": 1,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "status": "ACTIVE",
+                "source_link": "Generated by ReAct agent",
+                "source_quote": "N/A"
+            }
+            return [fact]
 
         except Exception as e:
-            # Этот блок поймает ЛЮБУЮ ошибку внутри метода execute
             print("\n" + "="*80, file=sys.stderr)
             print(f"!!! КРИТИЧЕСКИЙ СБОЙ ВНУТРИ АГЕНТА '{self.__class__.__name__}'", file=sys.stderr)
             print(f"    Задача: {task.get('task_id')}", file=sys.stderr)
-            print(f"    Модель: {model_name}", file=sys.stderr)
-            print(f"    Тип ошибки: {type(e).__name__}", file=sys.stderr)
-            print(f"    Сообщение: {e}", file=sys.stderr)
-            print("    --- ТРАССИРОВКА СТЕКА ---", file=sys.stderr)
+            print(f"    Тип ошибки: {type(e).__name__} - {e}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
-            print("    --------------------------", file=sys.stderr)
             print("="*80 + "\n", file=sys.stderr)
             sys.stderr.flush()
-            raise e # Пробрасываем ошибку дальше, чтобы Task Executor мог ее поймать
-    
+            # Возвращаем пустой список, чтобы orchestrator мог корректно обработать сбой
+            return []
+
 class ResearcherAgent(BaseResearchAgent):
     role_prompt: str = "Твоя роль: Ассистент-исследователь. Твоя цель — найти подтверждающие, основные факты по задаче."
 

@@ -195,19 +195,24 @@ class ArchitectAgent(BaseAgent):
         super().__init__(llm_client, budget_manager, tool_registry)
         self.toolsmith = toolsmith
 
-    # === ИЗМЕНЕНИЕ НАЧАТО: Метод теперь принимает отчет валидатора ===
-    def fix_or_enhance(self, failed_task: dict, validation_report: dict) -> dict:
+    def fix_or_enhance(self, failed_task: dict, validation_report: dict | None) -> dict:
         """
-        Создает инструмент на основе отчета от ValidatorAgent.
+        Пытается исправить проваленную задачу. Основная стратегия - создание инструмента.
+        Теперь устойчив к отсутствию validation_report.
         """
-        print(f"   [ArchitectAgent] -> Получил задачу '{failed_task.get('task_id')}' и отчет валидатора.")
-        
-        tool_description = validation_report.get('missing_tool_description')
+        print(f"   [ArchitectAgent] -> Анализирую задачу '{failed_task.get('task_id')}'...")
 
+        # === ИЗМЕНЕНИЕ НАЧАТО: Добавлена проверка на наличие отчета и описания инструмента ===
+        tool_description = None
+        if validation_report and validation_report.get('missing_tool_description'):
+            tool_description = validation_report.get('missing_tool_description')
+        
         if not tool_description:
-            print("   [ArchitectAgent] !!! Отчет валидатора не содержит описания инструмента. Сигнализирую о провале.")
+            print("   [ArchitectAgent] !!! Не удалось определить необходимый инструмент (отчет валидатора отсутствует или пуст).")
+            print("   [ArchitectAgent] <- Причина сбоя, вероятно, не в инструментах (например, ошибка API или логики агента). Не могу исправить автоматически.")
             failed_task['status'] = 'FATAL_ERROR'
             return failed_task
+        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
 
         # Генерируем имя для инструмента из его описания
         prompt_for_name = "Придумай короткое, но осмысленное имя в snake_case для инструмента, который делает следующее: '{}'. Верни только имя, например: 'search_and_read_webpage'.".format(tool_description)
@@ -219,9 +224,10 @@ class ArchitectAgent(BaseAgent):
             tool_code = self.toolsmith.generate_tool_code(tool_name, tool_description)
             self.tool_registry.register_tool(tool_name, tool_code)
             
+            # Возвращаем задачу в очередь для повторного выполнения с новым инструментом
             failed_task['status'] = 'PENDING'
             return failed_task
-        except Exception as e: # 'e' теперь корректно определена здесь
-            print(f"   [ArchitectAgent] !!! Процесс создания инструмента провалился: {e}. Сигнализирую о провале.")
+        except Exception as e:
+            print(f"   [ArchitectAgent] !!! Процесс создания инструмента провалился: {e}. Сигнализирую о фатальной ошибке.")
             failed_task['status'] = 'FATAL_ERROR'
             return failed_task
