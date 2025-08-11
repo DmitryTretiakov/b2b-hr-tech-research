@@ -199,7 +199,8 @@ class Task(BaseModel):
     task_id: str = Field(description="Уникальный ID задачи, например, 'data_collection_01'.")
     agent_name: str = Field(description="Имя агента, ответственного за выполнение.")
     description: str = Field(description="Подробное описание того, что нужно сделать.")
-    dependencies: List[str] = Field(default=[], description="Список ID задач, которые должны быть выполнены перед этой.")
+    dependencies: List[str] = Field(default_factory=list, description="Список ID задач, которые должны быть выполнены перед этой.")
+    data_dependencies: List[str] = Field(default_factory=list, description="Список ID задач, чьи РЕЗУЛЬТАТЫ из data_bus нужны для выполнения этой задачи.")
 
 class GraphPlan(BaseModel):
     """Pydantic-модель для описания плана графа."""

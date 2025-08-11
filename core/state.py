@@ -1,50 +1,43 @@
 # core/state.py
-from typing import List, Dict, TypedDict, Optional
+from typing import TypedDict, List, Dict, Any, Optional
 
-# --- Модели данных ---
-class KnowledgeUnit(TypedDict):
-    """Структура для одной единицы знания (факта) с версионированием."""
-    claim_id: str
-    statement: str
-    version: int
-    created_at: str
-    status: str  # 'ACTIVE', 'ARCHIVED'
-    source_link: str
-    # ... другие поля факта
-
-class Task(TypedDict):
-    """Структура для одной задачи."""
-    task_id: str
-    description: str
-    agent_name: str # e.g., 'Researcher', 'Janitor'
-    status: str # 'PENDING', 'COMPLETED', 'FAILED'
-    
-# --- Главное Состояние Графа ---
+# Определяем структуру состояния графа с помощью TypedDict для простоты и производительности.
+# Это замена бинарному файлу, обеспечивающая читаемость.
 class GraphState(TypedDict):
     """
-    Представляет полное состояние нашего графа.
-    Передается между всеми узлами.
+    Центральное состояние, управляющее всем потоком вычислений.
+
+    Attributes:
+        user_config: Конфигурация, загруженная из config.yaml.
+        task_queue: Список задач, ожидающих выполнения.
+        completed_tasks: Список выполненных задач.
+        knowledge_base: База Знаний, словарь с фактами.
+        artifacts: Словарь для хранения финальных бизнес-артефактов.
+        data_bus: Шина данных для передачи сырых результатов между задачами.
+        model_assignments: Распределение моделей по задачам.
+        visited_urls: Список URL, которые уже были посещены.
+        escalation_count: Счетчик эскалаций для одной задачи.
+        current_task: Текущая выполняемая задача.
+        error_message: Сообщение об ошибке для последней неудачи.
+        node_outputs: Внутреннее хранилище для результатов узлов.
+        report_outline: План (оглавление) для финального отчета.
+        drafted_sections: Список написанных секций отчета.
+        current_section_to_draft: Текущая секция, над которой идет работа.
     """
-    # Контекст, загружаемый при старте
     user_config: Dict
-
-    # Динамически изменяемые поля
-    task_queue: List[Task]
-    completed_tasks: List[Task]
-    knowledge_base: Dict[str, KnowledgeUnit]
-    artifacts: Dict[str, Dict]  # <-- НОВОЕ ПОЛЕ ДЛЯ ХРАНЕНИЯ АРТЕФАКТОВ
-    visited_urls: List[str]
-    
-    # Поля для управления эскалацией
-    current_task: Optional[Task]
+    task_queue: List[Dict]
+    completed_tasks: List[Dict]
+    knowledge_base: Dict[str, Any]
+    artifacts: Dict[str, Any]
+    # --- ИЗМЕНЕНИЕ НАЧАТО: Добавлена шина данных ---
+    data_bus: Dict[str, Any]
+    # --- ИЗМЕНЕНИЕ ОКОНЧЕНО ---
     model_assignments: Dict[str, str]
+    visited_urls: List[str]
     escalation_count: int
-    
-    # Поля для передачи результатов между узлами
+    current_task: Optional[Dict]
     error_message: Optional[str]
-    node_outputs: Dict[str, List]
-
-    # Поля для многоэтапного написания отчета
-    report_outline: Optional[Dict]
+    node_outputs: Dict[str, Any]
+    report_outline: Dict
     drafted_sections: List[Dict]
     current_section_to_draft: Optional[Dict]

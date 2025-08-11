@@ -72,43 +72,8 @@ class SingleStepToolAgent(BaseAgent):
             
             result = self.tool_registry.use_tool(tool_name, tool_args, state)
             
-            # === ИЗМЕНЕНИЕ НАЧАТО: Шаг 3 - Осмысление результата и создание качественного факта ===
-            print("      [SingleStepToolAgent] -> Осмысляю результат для создания качественного факта...")
-            
-            # Преобразуем результат в строку, обрезая слишком длинные ответы
-            result_str = json.dumps(result, ensure_ascii=False, indent=2)
-            if len(result_str) > 10000:
-                result_str = result_str[:10000] + "\n... (результат обрезан)"
-
-            # Используем быструю модель для извлечения сути
-            summary_prompt = f"""
-Проанализируй результат вызова инструмента ниже, который был выполнен для решения следующей задачи:
-**Задача:** {task['description']}
-
-**Результат вызова инструмента:**
-```json
-{result_str}
-```
-
-Твоя задача - сформулировать одно, атомарное, человекочитаемое утверждение (факт), которое является главным выводом из этих данных в контексте исходной задачи.
-Например, если задача была "найти зарплату", а в результате есть JSON с `min_salary: 100`, `max_salary: 150`, твой факт должен быть: "Средняя зарплата для X составляет от 100 до 150 тысяч".
-Не включай в факт метаданные вроде "результат выполнения задачи...". Начинай сразу с сути.
-"""
-            summary_response = self.llm_client.invoke("gemini-2.5-flash", summary_prompt)
-            summarized_statement = summary_response.content.strip().strip('"') # Убираем лишние кавычки
-            
-            fact = {
-                "claim_id": f"fact_{task['task_id']}",
-                "statement": summarized_statement, # Используем осмысленный факт
-                "version": 1,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "status": "ACTIVE",
-                "source_link": f"tool://{tool_name}",
-                "source_quote": json.dumps(tool_args, ensure_ascii=False)
-            }
-            print(f"      [SingleStepToolAgent] <- Создан факт: {summarized_statement}")
-            return [fact]
-            # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
+            print(f"      [SingleStepToolAgent] <- Возвращаю сырой результат от инструмента '{tool_name}'.")
+            return result
 
         except Exception as e:
             print("\n" + "="*80, file=sys.stderr)
@@ -272,7 +237,7 @@ class FinancialModelAgent(BaseAgent):
     def execute(self, task: dict, model_name: str, user_config: Dict) -> dict:
         print(f"   [FinancialModelAgent] -> Задача '{task['task_id']}' на модели {model_name}...")
         main_goal = user_config.get("user_context", {}).get("main_goal", "Цель не определена.")
-        knowledge_base = task.get("knowledge_base", {}) # Предполагаем, что KB передается в задаче
+        knowledge_base = task.get("input_data", {}).get("knowledge_base", {})
         
         prompt = f"""
 **КОНТЕКСТ ПРОЕКТА:** {main_goal}

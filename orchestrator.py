@@ -53,6 +53,21 @@ def task_fetcher_node(state: GraphState) -> GraphState:
     task = state['task_queue'].pop(0)
     state['current_task'] = task
     state['error_message'] = None
+    input_data = {}
+    data_dependencies = task.get('data_dependencies', [])
+    if data_dependencies:
+        print(f"   [FetcherNode] -> Собираю данные для зависимостей: {data_dependencies}")
+        for dep_task_id in data_dependencies:
+            if dep_task_id in state['data_bus']:
+                input_data[dep_task_id] = state['data_bus'][dep_task_id]
+            else:
+                # Этого не должно случиться при правильном планировании, но на всякий случай
+                print(f"   [FetcherNode] !!! ВНИМАНИЕ: Зависимость по данным '{dep_task_id}' не найдена в data_bus!")
+    # Помещаем собранные данные в саму задачу для легкого доступа агентом
+    task['input_data'] = input_data
+    # Также передаем всю Базу Знаний для интеллектуальных агентов
+    task['input_data']['knowledge_base'] = state.get('knowledge_base', {})
+
     print(f"   [FetcherNode] -> Взял в работу задачу: {task['task_id']} ({task['agent_name']})")
     return state
 
@@ -100,28 +115,23 @@ def task_executor_node(state: GraphState, agents: dict) -> GraphState:
     agent_name = task['agent_name']
     agent = agents.get(agent_name)
     model = state['model_assignments'].get(task['task_id'])
-    
+
     if not agent or not model:
         task['status'] = 'FAILURE'
         state['error_message'] = f"Агент {agent_name} или модель не найдены."
     else:
         try:
-            result = agent.execute(task, model, state.copy())
-            
-            print("\n" + "-"*25 + " НАЧАЛО ОТВЕТА АГЕНТА " + "-"*25)
-            print(f"Сырой результат от агента '{agent_name}':")
-            print(result)
-            print("-" * 25 + " КОНЕЦ ОТВЕТА АГЕНТА " + "-"*27 + "\n")
+            # Агенты теперь получают все состояние, чтобы иметь доступ к user_config и другим мета-данным
+            result = agent.execute(task, model, state)
 
-            if not result:
+            if result is None:
                 task['status'] = 'FAILURE'
-                state['error_message'] = "Агент не вернул результат. Вероятная причина - ошибка API или внутренняя ошибка агента. См. лог выше."
+                state['error_message'] = "Агент не вернул результат (None). Вероятная причина - внутренняя ошибка агента."
             else:
                 task['status'] = 'SUCCESS'
-                if agent_name in ["Researcher", "Contrarian"]:
-                    state['node_outputs']['accumulated_raw_facts'].extend(result)
-                elif agent_name in ["FinancialModelAgent", "ProductManagerAgent"]:
-                    state.setdefault('artifacts', {})[task['task_id']] = result
+                # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Результат кладется в data_bus ---
+                state.setdefault('data_bus', {})[task['task_id']] = result
+                print(f"   [ExecutorNode] -> Результат задачи '{task['task_id']}' записан в data_bus.")
 
         # === ИЗМЕНЕНИЕ НАЧАТО: Заменено на BaseException для перехвата абсолютно всех ошибок ===
         except BaseException as e:
@@ -208,6 +218,55 @@ def reflection_node(state: GraphState, supervisor: SupervisorAgent) -> GraphStat
         
     return state
 
+def kb_ingestion_node(state: GraphState) -> GraphState:
+    """
+    НОВЫЙ УЗЕЛ. Преобразует сырой результат из data_bus в кандидатов для БЗ.
+    """
+    print("\n--- Узел: KB Ingestion ---")
+    last_task = state['completed_tasks'][-1]
+    task_id = last_task['task_id']
+    raw_result = state.get('data_bus', {}).get(task_id)
+
+    if not raw_result or not isinstance(raw_result, list):
+        print(f"   [IngestionNode] -> Нет данных для обработки от задачи {task_id}. Пропускаю.")
+        state.setdefault('node_outputs', {})['facts_for_assessment'] = []
+        return state
+
+    # Здесь можно добавить сложную логику валидации и преобразования.
+    # Пока что мы просто принимаем, что результат - это уже готовый список фактов.
+    # Это компромисс, чтобы не усложнять, но в будущем здесь может быть вызов LLM.
+    facts_to_assess = raw_result
+    print(f"   [IngestionNode] -> Подготовлено {len(facts_to_assess)} фактов-кандидатов для QA.")
+    state.setdefault('node_outputs', {})['facts_for_assessment'] = facts_to_assess
+    return state
+
+def artifact_commit_node(state: GraphState) -> GraphState:
+    """
+    НОВЫЙ УЗЕЛ. Перемещает готовый артефакт из data_bus в финальное хранилище.
+    """
+    print("\n--- Узел: Artifact Commit ---")
+    last_task = state['completed_tasks'][-1]
+    task_id = last_task['task_id']
+    artifact_data = state.get('data_bus', {}).get(task_id)
+
+    if artifact_data:
+        state.setdefault('artifacts', {})[task_id] = artifact_data
+        print(f"   [ArtifactCommit] -> Артефакт '{task_id}' сохранен.")
+    return state
+def commit_to_kb_node(state: GraphState) -> GraphState:
+    """
+    Фиксирует проверенные факты в Базе Знаний.
+    """
+    print("\n--- Узел: Commit to KB ---")
+    final_facts = state['node_outputs'].get('final_facts', [])
+    current_kb = state.get('knowledge_base', {})
+    for fact in final_facts:
+        current_kb[fact['claim_id']] = fact
+    state['knowledge_base'] = current_kb
+    # Очищаем промежуточные данные
+    state['node_outputs'] = {}
+    print(f"   [CommitToKB] -> {len(final_facts)} фактов добавлено в Базу Знаний.")
+    return state
 
 def failure_analyst_node(state: GraphState, failure_analyst: FailureAnalystAgent) -> GraphState:
     """
@@ -382,18 +441,45 @@ def revision_node(state: GraphState, reviser: ReviserAgent, supervisor: Supervis
 # ====================================================================================
 
 def task_router(state: GraphState) -> str:
-    """
-    Маршрутизатор, который проверяет, есть ли активная задача для выполнения.
-    """
+    """Маршрутизатор, который решает, есть ли задачи или нужно завершать работу."""
     print("\n--- Узел: Task Router ---")
-    if state.get('current_task'):
-        print("   [TaskRouter] -> Есть активная задача. Перехожу к валидации.")
-        return "tool_validator"
+    if state.get('task_queue'):
+        return "fetcher"
     else:
-        # === ИЗМЕНЕНИЕ НАЧАТО: Перенаправление на финальный аудит вместо ревизии ===
-        print("   [TaskRouter] -> Очередь задач пуста. Перехожу к финальному аудиту.")
-        return "final_audit"
-        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
+        # Если задач нет, проверяем, есть ли план отчета. Если нет, создаем.
+        if not state.get('report_outline'):
+             print("   [TaskRouter] -> Очередь пуста. Перехожу к созданию плана отчета.")
+             return "outline"
+        else:
+             print("   [TaskRouter] -> Все задачи и отчеты завершены. Конец работы.")
+             return END
+
+def post_execution_router(state: GraphState) -> str:
+    """
+    НОВЫЙ МАРШРУТИЗАТОР. Решает, что делать после выполнения задачи.
+    """
+    print("\n--- Узел: Post-Execution Router ---")
+    last_task = state['completed_tasks'][-1]
+
+    if last_task['status'] == 'FAILURE':
+        print(f"   [PostExecRouter] !!! Задача {last_task['task_id']} провалена. Передаю на анализ.")
+        return "failure_analyst"
+
+    # Определяем тип задачи по имени агента (можно использовать и префиксы в task_id)
+    agent_name = last_task['agent_name']
+    is_research_task = agent_name in ["SingleStepToolAgent"]
+    is_artifact_task = agent_name in ["FinancialModelAgent", "ProductManagerAgent", "RoadmapVisualizationAgent"]
+
+    if is_research_task:
+        print("   [PostExecRouter] -> Исследовательская задача. Отправляю на обработку в KB.")
+        return "kb_ingestion"
+    elif is_artifact_task:
+        print("   [PostExecRouter] -> Задача генерации артефакта. Сохраняю артефакт.")
+        return "artifact_commit"
+    else:
+        # Для всех остальных (аналитических, ревизионных и т.д.) просто берем следующую задачу
+        print(f"   [PostExecRouter] -> Задача типа '{agent_name}'. Беру следующую задачу.")
+        return "task_router"
 
     
 def final_audit_router(state: GraphState) -> str:
@@ -585,113 +671,108 @@ def section_writing_router(state: GraphState) -> str:
 def build_graph(agents: dict, output_dir: str):
     workflow = StateGraph(GraphState)
 
-    # --- Регистрация всех узлов в графе ---
+    # --- Регистрация узлов ---
     workflow.add_node("supervisor", lambda state: supervisor_node(state, agents['Supervisor']))
     workflow.add_node("task_fetcher", task_fetcher_node)
-    workflow.add_node("tool_validator", lambda state: tool_validator_node(state, agents['Validator']))
     workflow.add_node("task_executor", lambda state: task_executor_node(state, agents))
-    workflow.add_node("prepare_for_architect", prepare_for_architect_node)
-    workflow.add_node("architect", lambda state: architect_node(state, agents['Architect'], agents['Validator']))
-    workflow.add_node("failure_analyst", lambda state: failure_analyst_node(state, agents['FailureAnalyst']))
-    workflow.add_node("final_audit", lambda state: final_audit_node(state, agents['Architect']))
-    
-    # Узлы конвейера QA и наполнения Базы Знаний
-    workflow.add_node("revision", lambda state: revision_node(state, agents['Reviser'], agents['Supervisor']))
+    workflow.add_node("kb_ingestion", kb_ingestion_node)
+    workflow.add_node("artifact_commit", artifact_commit_node)
+    workflow.add_node("commit_to_kb", commit_to_kb_node)
+
+    # Узлы QA
     workflow.add_node("qa", lambda state: qa_node(state, agents['QualityAssessor']))
     workflow.add_node("fixer", lambda state: fixer_node(state, agents['Fixer']))
-    workflow.add_node("qa_reassessment", lambda state: qa_node(state, agents['QualityAssessor']))
     workflow.add_node("sanity_check", lambda state: sanity_check_node(state, agents['SanityCheckCritic']))
-    workflow.add_node("commit", commit_node)
-    
-    # Узлы для планирования и генерации отчета
-    workflow.add_node("janitor", lambda state: janitor_node(state, agents['Janitor']))
-    workflow.add_node("reflection", lambda state: reflection_node(state, agents['Supervisor']))
+
+    # Узлы обработки сбоев
+    workflow.add_node("failure_analyst", lambda state: failure_analyst_node(state, agents['FailureAnalyst']))
+    workflow.add_node("architect", lambda state: architect_node(state, agents['Architect'], agents['Validator']))
+    workflow.add_node("tool_validator", lambda state: tool_validator_node(state, agents['Validator']))
+
+    # Узлы генерации отчета
     workflow.add_node("outline", lambda state: outline_node(state, agents['OutlineAgent']))
-    workflow.add_node("section_fetcher", section_fetcher_node)
     workflow.add_node("section_writer", lambda state: section_writer_node(state, agents['SectionWriterAgent']))
     workflow.add_node("final_compiler", lambda state: final_compile_node(state, agents['ReportWriter'], output_dir))
 
     # --- Определение потока управления (ребер графа) ---
-    
-    # 1. Точка входа и основной цикл выполнения задач
     workflow.set_entry_point("supervisor")
     workflow.add_edge("supervisor", "task_fetcher")
+
+    # 1. Основной цикл: проверка наличия задач
     workflow.add_conditional_edges(
         "task_fetcher",
-        task_router,
+        lambda s: "validator" if s.get("current_task") else "task_router",
+        {"validator": "tool_validator", "task_router": "task_router"}
+    )
+
+    # 2. Валидация и выполнение задачи
+    workflow.add_conditional_edges("tool_validator", validation_router, {
+        "executor": "task_executor",
+        "architect": "architect"
+    })
+    workflow.add_edge("task_executor", "post_execution_router")
+
+    # 3. Маршрутизация после выполнения
+    workflow.add_conditional_edges(
+        "post_execution_router",
+        lambda s: s['completed_tasks'][-1]['status'] if s.get('completed_tasks') else END,
         {
-            "tool_validator": "tool_validator",
-            "final_audit": "final_audit" # Выход из цикла, если задач нет
+            "SUCCESS": "post_success_router", # Вложенный маршрутизатор для успеха
+            "FAILURE": "failure_analyst"
         }
     )
     
-    # === ИЗМЕНЕНИЕ НАЧАТО: Убран ошибочный переход к prepare_for_architect ===
-    workflow.add_conditional_edges("tool_validator", validation_router, {
-        "executor": "task_executor",
-        "architect": "architect" # Направляем НАПРЯМУЮ к архитектору
-    })
-    # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
+    # 3a. Вложенный маршрутизатор для успешных задач
+    workflow.add_conditional_edges(
+        "post_success_router",
+        lambda s: agents[s['completed_tasks'][-1]['agent_name']].__class__.__name__, # Определяем путь по имени агента
+        {
+            "SingleStepToolAgent": "kb_ingestion",
+            "FinancialModelAgent": "artifact_commit",
+            "ProductManagerAgent": "artifact_commit",
+            # ... другие агенты-артефакторы
+            "default": "task_router" # Для всех остальных - к следующей задаче
+        }
+    )
 
-    # 2. Маршрутизация после выполнения задачи (успех или неудача)
-    workflow.add_conditional_edges("task_executor", post_execution_router, {
-        "fetcher": "task_fetcher",
-        "revision": "revision",
-        "failure_analyst": "failure_analyst"
-    })
+    # 4. Ветки обработки результатов
+    workflow.add_edge("kb_ingestion", "qa")
+    workflow.add_edge("artifact_commit", "task_router")
 
-    # 3. Ветка интеллектуальной обработки сбоев
+    # 5. Конвейер QA
+    workflow.add_conditional_edges("qa", qa_router, {
+        "fixer": "fixer",
+        "sanity_check": "sanity_check"
+    })
+    workflow.add_edge("fixer", "qa") # После исправления - снова на оценку
+    workflow.add_edge("sanity_check", "commit_to_kb")
+    workflow.add_edge("commit_to_kb", "task_router") # После коммита - к следующей задаче
+
+    # 6. Ветка обработки сбоев (без изменений)
     workflow.add_conditional_edges("failure_analyst", failure_router, {
         "fetcher": "task_fetcher",
-        "prepare_for_architect": "prepare_for_architect", # Здесь prepare_for_architect остается, т.к. это реактивный путь
+        "architect": "architect",
         END: END
     })
-
-    # 4. Ветка самокоррекции (создание/исправление инструментов)
-    workflow.add_edge("prepare_for_architect", "architect")
     workflow.add_conditional_edges("architect", architect_router, {
         "fetcher": "task_fetcher",
         END: END
     })
 
-    # 5. Конвейер наполнения Базы Знаний (QA Pipeline)
-    workflow.add_conditional_edges("revision", revision_router, {
-        "fetcher": "task_fetcher", 
-        "qa": "qa"
-    })
-    workflow.add_conditional_edges("qa", qa_router, {
-        "fixer": "fixer", 
-        "sanity_check": "sanity_check"
-    })
-    workflow.add_edge("fixer", "qa_reassessment")
-    workflow.add_conditional_edges("qa_reassessment", reassessment_router, {
-        "sanity_check": "sanity_check"
-    })
-    workflow.add_edge("sanity_check", "commit")
+    # 7. Ветка генерации отчета (запускается из task_router, когда задачи кончились)
+    workflow.add_edge("outline", "task_router") # После создания плана - снова в роутер, который найдет задачи на написание секций
+    workflow.add_edge("section_writer", "task_router")
+    workflow.add_edge("final_compiler", END) # Конец
 
-    # 6. Переход от Фазы 1 (Исследование) к Фазе 2 (Генерация)
-    workflow.add_edge("commit", "janitor") # Сначала чистим KB
-    workflow.add_edge("janitor", "reflection") # Затем на основе чистой KB планируем следующую фазу
-    workflow.add_conditional_edges("reflection", reflection_router, {
-        "fetcher": "task_fetcher", # Если Supervisor создал новые задачи
-        "outline": "outline"       # Если задач нет, переходим к созданию плана отчета
-    })
-
-    # 7. Конвейер написания отчета
-    workflow.add_edge("outline", "section_fetcher")
-    workflow.add_edge("section_fetcher", "section_writer")
-    workflow.add_conditional_edges("section_writer", section_writing_router, {
-        "fetcher": "section_fetcher", 
-        "compiler": "final_compiler"
-    })
-    workflow.add_edge("final_compiler", END)
-
-    # 8. Ветка финального аудита
-    workflow.add_conditional_edges("final_audit", final_audit_router, {
+    # 8. Финальный маршрутизатор
+    workflow.add_conditional_edges("task_router", task_router, {
         "fetcher": "task_fetcher",
+        "outline": "outline",
         END: END
     })
 
     return workflow.compile()
+
 
 
 # ====================================================================================
@@ -700,10 +781,13 @@ def build_graph(agents: dict, output_dir: str):
 
 def run(app, initial_state: GraphState, state_file_path: str):
     try:
-        for event in app.stream(initial_state, stream_mode="values"):
+        # Увеличиваем лимит рекурсии для сложных графов
+        config = {"recursion_limit": 100}
+        for event in app.stream(initial_state, config, stream_mode="values"):
             try:
                 with open(state_file_path, "w", encoding="utf-8") as f:
-                    json.dump(event, f, ensure_ascii=False, indent=2)
+                    # Используем default=str для сериализации объектов, которые не являются JSON-сериализуемыми
+                    json.dump(event, f, ensure_ascii=False, indent=2, default=str)
             except (IOError, TypeError) as e:
                 print(f"!!! [Orchestrator] ВНИМАНИЕ: Не удалось сохранить состояние. Ошибка: {e}")
         print("\n--- ВЫПОЛНЕНИЕ ГРАФА ЗАВЕРШЕНО ---")
