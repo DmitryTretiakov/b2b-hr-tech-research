@@ -1,7 +1,7 @@
 # core/llm_client.py
 import sys
 import traceback
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai import ChatGoogleGenerativeAI, HarmCategory, HarmBlockThreshold
 from core.budget_manager import APIBudgetManager
 
 class LLMClient:
@@ -11,20 +11,32 @@ class LLMClient:
     """
     def __init__(self, budget_manager: APIBudgetManager):
         self.budget_manager = budget_manager
-        
-        # Инициализация моделей согласно иерархии из ТЗ
+
+        # === ИЗМЕНЕНИЕ НАЧАТО: Добавлены настройки безопасности для отключения фильтров ===
+        # Определяем настройки, которые отключают все блокировки.
+        # Это необходимо для проверки гипотезы о том, что фильтры безопасности
+        # изменяют ответ, даже если не блокируют его полностью.
+        safety_settings = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+        }
+        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
+
+        # Инициализация моделей с передачей настроек безопасности
         self._models = {
             # Уровень 4
-            "gemini-2.5-pro": ChatGoogleGenerativeAI(model="models/gemini-2.5-pro", temperature=0.3),
+            "gemini-2.5-pro": ChatGoogleGenerativeAI(model="models/gemini-2.5-pro", temperature=0.3, safety_settings=safety_settings),
             # Уровень 3
-            "gemini-2.5-flash": ChatGoogleGenerativeAI(model="models/gemini-2.5-flash", temperature=0.1),
+            "gemini-2.5-flash": ChatGoogleGenerativeAI(model="models/gemini-2.5-flash", temperature=0.1, safety_settings=safety_settings),
             # Уровень 2
-            "gemini-2.5-flash-lite": ChatGoogleGenerativeAI(model="models/gemini-2.5-flash-lite", temperature=0.1),
-            "gemma-3": ChatGoogleGenerativeAI(model="models/gemma-3-27b-it", temperature=0.0),
+            "gemini-2.5-flash-lite": ChatGoogleGenerativeAI(model="models/gemini-2.5-flash-lite", temperature=0.1, safety_settings=safety_settings),
+            "gemma-3": ChatGoogleGenerativeAI(model="models/gemma-3-27b-it", temperature=0.0, safety_settings=safety_settings),
             # Уровень 1 (пример, можно расширить)
-            "gemma-3n": ChatGoogleGenerativeAI(model="models/gemma-3-12b-it", temperature=0.0),
+            "gemma-3n": ChatGoogleGenerativeAI(model="models/gemma-3-12b-it", temperature=0.0, safety_settings=safety_settings),
         }
-        print("-> LLMClient инициализирован с утвержденной иерархией моделей.")
+        print("-> LLMClient инициализирован с утвержденной иерархией моделей и отключенными фильтрами безопасности.")
 
     def _get_model_instance(self, model_name: str) -> ChatGoogleGenerativeAI:
         instance = self._models.get(model_name)
@@ -40,31 +52,27 @@ class LLMClient:
             error_message = f"Дневной лимит для модели {model_name} исчерпан."
             print(f"   [LLMClient] !!! ОШИБКА: {error_message}")
             raise ConnectionError(error_message)
-            
+
         print(f"   [LLMClient] -> Вызов модели Уровня '{self.get_level(model_name)}': {model_name}")
-        
+
         instance = self._get_model_instance(model_name)
-        
-        # === ИЗМЕНЕНИЕ НАЧАТО: Добавлен агрессивный блок обработки ошибок API ===
+
         try:
             response = instance.invoke(prompt)
-            
-            # Принцип "Fail Loudly": пустой ответ от API - это критическая ошибка.
+
             if not response or not hasattr(response, 'content') or not response.content.strip():
                 print("\n" + "="*80, file=sys.stderr)
                 print(f"!!! [LLMClient] КРИТИЧЕСКАЯ ОШИБКА: Получен ПУСТОЙ или НЕКОРРЕКТНЫЙ ответ от модели '{model_name}'.", file=sys.stderr)
                 print(f"    Сырой ответ: {response}", file=sys.stderr)
                 print("="*80 + "\n", file=sys.stderr)
                 sys.stderr.flush()
-                # Генерируем исключение, чтобы остановить выполнение и показать проблему.
                 raise ValueError(f"API для модели '{model_name}' вернул пустой ответ. Проверьте права доступа и квоты в Google Cloud.")
-            
+
             self.budget_manager.record_spend(model_name)
             return response
-            
+
         except Exception as e:
             error_details = "Дополнительные детали не найдены."
-            # Попытка извлечь более детальную информацию из исключения, если она есть
             if hasattr(e, 'response') and hasattr(e.response, 'text'):
                 error_details = f"Детали ответа API: {e.response.text}"
 
@@ -77,9 +85,7 @@ class LLMClient:
             traceback.print_exc(file=sys.stderr)
             print("="*80 + "\n", file=sys.stderr)
             sys.stderr.flush()
-            # Пробрасываем исключение дальше, чтобы система могла его обработать.
             raise e
-        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
 
     def get_level(self, model_name: str) -> int:
         """Возвращает уровень иерархии для модели."""
