@@ -8,3 +8,4 @@ langgraph
 PyYAML
 streamlit
 pandas
+tiktoken

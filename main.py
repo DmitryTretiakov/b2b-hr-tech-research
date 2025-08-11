@@ -10,6 +10,8 @@ from core.budget_manager import APIBudgetManager
 from core.tool_registry import ToolRegistry
 from core.state import GraphState
 from orchestrator import build_graph, run
+from core.context_compressor import ContextCompressor
+
 
 # === ИЗМЕНЕНИЕ НАЧАТО: Импортируем ValidatorAgent ===
 from agents.meta_agents import ArchitectAgent, KnowledgeJanitorAgent, ToolSmithAgent, ValidatorAgent
@@ -95,6 +97,8 @@ def main():
     llm_client = LLMClient(budget_manager)
     tool_registry = ToolRegistry(generated_tools_dir="tools/generated")
 
+    context_compressor = ContextCompressor(llm_client, budget_manager)
+
     # === ИЗМЕНЕНИЕ НАЧАТО: Запуск предполетной проверки ===
     if not run_pre_flight_checks():
         print("!!! Предполетная проверка провалена. Запуск основного графа отменен.")
@@ -108,12 +112,14 @@ def main():
     
     agents = {
         "Supervisor": SupervisorAgent(llm_client, budget_manager),
-        "Reviser": ReviserAgent(llm_client, budget_manager),
+        # === ИЗМЕНЕНИЕ НАЧАТО: Передача компрессора в аналитические агенты ===
+        "Reviser": ReviserAgent(llm_client, budget_manager, context_compressor),
+        "Analyst": AnalystAgent(llm_client, budget_manager, context_compressor),
+        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
         "SingleStepToolAgent": SingleStepToolAgent(llm_client, budget_manager, tool_registry),
         "QualityAssessor": QualityAssessorAgent(llm_client, budget_manager),
         "Fixer": FixerAgent(llm_client, budget_manager),
         "SanityCheckCritic": SanityCheckCritic(llm_client, budget_manager),
-        "Analyst": AnalystAgent(llm_client, budget_manager),
         "OutlineAgent": OutlineAgent(llm_client, budget_manager),
         "SectionWriterAgent": SectionWriterAgent(llm_client, budget_manager),
         "ReportWriter": ReportWriterAgent(llm_client, budget_manager),

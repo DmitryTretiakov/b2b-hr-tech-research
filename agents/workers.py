@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain_core.prompts import PromptTemplate
 from agents.base_agent import BaseAgent
+from core.context_compressor import ContextCompressor
 from utils.helpers import invoke_llm_for_json_with_retry
 from agents.models import (
     FactExtractionReport, BatchQualityAssessmentReport, AnalystReport, 
@@ -215,8 +216,19 @@ class SanityCheckCritic(BaseAgent):
         return [fact for fact in facts_to_check if fact['claim_id'] in verified_ids]
 
 class AnalystAgent(BaseAgent):
+    # === ИЗМЕНЕНИЕ НАЧАТО: Принимаем и храним компрессор ===
+    def __init__(self, llm_client, budget_manager, context_compressor: ContextCompressor):
+        super().__init__(llm_client, budget_manager)
+        self.context_compressor = context_compressor
+    # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
+
     def execute_reflection(self, knowledge_base: dict, model_name: str, user_config: Dict) -> dict:
-        prompt = f"Твоя роль: Старший аналитик. Проанализируй Базу Знаний и предоставь краткую сводку для планировщика: 3-5 ключевых инсайтов и 2-3 пробела в данных.\nБАЗА ЗНАНИЙ:\n{json.dumps(knowledge_base, ensure_ascii=False, indent=2)}"
+        # === ИЗМЕНЕНИЕ НАЧАТО: Используем компрессор ===
+        task_desc = "Проанализировать Базу Знаний, чтобы найти 3-5 ключевых инсайтов и 2-3 пробела в данных для планирования следующего шага."
+        compressed_kb = self.context_compressor.compress(knowledge_base, task_desc)
+        
+        prompt = f"Твоя роль: Старший аналитик. Проанализируй следующую сводку из Базы Знаний и предоставь краткий отчет для планировщика: 3-5 ключевых инсайтов и 2-3 пробела в данных.\nСВОДКА:\n{compressed_kb}"
+        # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
         report = invoke_llm_for_json_with_retry(self.llm_client, "gemini-2.5-pro", "gemini-2.5-flash", prompt, AnalystReport, self.budget_manager)
         return {"status": "SUCCESS", "data": report}
 
@@ -322,37 +334,43 @@ class ReportWriterAgent(BaseAgent):
 
 class ReviserAgent(BaseAgent):
     """
-    Агент-критик, который оценивает полноту и релевантность собранной информации
-    в середине исследовательской фазы и корректирует курс.
+    Агент-критик, который оценивает полноту и релевантность собранной информации.
     """
+    # === ИЗМЕНЕНИЕ НАЧАТО: Принимаем и храним компрессор ===
+    def __init__(self, llm_client, budget_manager, context_compressor: ContextCompressor):
+        super().__init__(llm_client, budget_manager)
+        self.context_compressor = context_compressor
+    # === ИЗМЕНЕНИЕ ОКОНЧЕНО ===
+
     def execute(self, task: dict, model_name: str, user_config: Dict) -> dict:
         print(f"   [ReviserAgent] -> Задача '{task['task_id']}' на модели {model_name}...")
         
-        # Извлекаем все необходимые данные из задачи, которую для нас сформировал orchestrator
         main_goal = user_config.get("user_context", {}).get("main_goal", "Цель не определена.")
         knowledge_base = task.get("knowledge_base", {})
         remaining_tasks = task.get("remaining_tasks", [])
 
+        # === ИЗМЕНЕНИЕ НАЧАТО: Используем компрессор ===
+        task_desc = f"Провести ревизию собранной информации на предмет ее достаточности для достижения главной цели: {main_goal}"
+        compressed_kb = self.context_compressor.compress(knowledge_base, task_desc)
+
         prompt = f"""
-**ТВОЯ РОЛЬ:** Ты - Ведущий Исследователь-Стратег и внутренний критик. Твоя задача - не выполнять поиск, а анализировать уже проделанную работу и корректировать дальнейший курс.
+**ТВОЯ РОЛЬ:** Ведущий Исследователь-Стратег и внутренний критик.
 
 **ГЛАВНАЯ ЦЕЛЬ ПРОЕКТА:**
 {main_goal}
 
-**УЖЕ СОБРАННЫЕ ФАКТЫ (ТЕКУЩАЯ БАЗА ЗНАНИЙ):**
-```json
-{json.dumps(knowledge_base, ensure_ascii=False, indent=2)}
-```
+**СВОДКА УЖЕ СОБРАННЫХ ФАКТОВ (СЖАТЫЙ КОНТЕКСТ):**
+{compressed_kb}
 
-**ЗАДАЧI, КОТОРЫЕ ЕЩЕ ОСТАЛОСЬ ВЫПОЛНИТЬ В ЭТОЙ ФАЗЕ:**
+**ЗАДАЧИ, КОТОРЫЕ ЕЩЕ ОСТАЛОСЬ ВЫПОЛНИТЬ В ЭТОЙ ФАЗЕ:**
 {json.dumps(remaining_tasks, ensure_ascii=False, indent=2)}
 
 **ТВОЯ ЗАДАЧА - ПРОВЕСТИ РЕВИЗИЮ:**
-1.  **Оцени Достаточность:** Достаточно ли уже собранных фактов для ответа на главный вопрос проекта? Не ушли ли мы в сторону?
-2.  **Найди "Слепые Зоны":** Каких критически важных данных все еще не хватает? Есть ли в собранной информации предвзятость (например, только положительные отзывы)?
+1.  **Оцени Достаточность:** Достаточно ли информации в сводке для ответа на главный вопрос проекта?
+2.  **Найди "Слепые Зоны":** Каких критически важных данных все еще не хватает?
 3.  **Прими Решение:**
-    - Если информация полна и релевантна, установи `is_sufficient: true`.
-    - Если нужны доработки, установи `is_sufficient: false`, дай четкий `feedback` и предложи конкретные формулировки для новых задач в `new_task_suggestions`.
+    - Если информация полна, установи `is_sufficient: true`.
+    - Если нужны доработки, установи `is_sufficient: false`, дай `feedback` и предложи формулировки для новых задач в `new_task_suggestions`.
 
 Верни результат в виде JSON, соответствующего схеме `RevisionReport`.
 """
